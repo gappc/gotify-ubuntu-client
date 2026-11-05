@@ -1,8 +1,8 @@
-# gotify-tray
+# gotify-ubuntu-client
 
 A small Gotify client for Ubuntu (GNOME). It stays connected to one Gotify
 server, shows desktop notifications, and puts an icon in the top bar that
-turns red while an Uptime Kuma monitor is down.
+turns red while an Uptime Kuma monitor is down. It consists of two programs:
 
 - **Background service** (`gotify-tray`): connection, notifications, tray
   icon. Small (about 8 MB of memory) and always running; it doesn't load GTK.
