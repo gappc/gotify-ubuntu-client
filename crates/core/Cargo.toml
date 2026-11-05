@@ -9,3 +9,14 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+url.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+oo7.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
