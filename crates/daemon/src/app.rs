@@ -22,7 +22,9 @@ use url::Url;
 use crate::backoff::Backoff;
 use crate::outage::Outage;
 use crate::notify::{NotifierSignal, NotifyBackend, Notifier, Target};
-use crate::tray::{DownEntry, IconKind, TrayCommand, TrayView};
+use crate::tray::{DownEntry, IconKind, MutedEntry, TrayCommand, TrayView};
+use gotify_core::kuma::KumaStatus;
+use gotify_core::mutes::{MuteFor, MuteTarget, Mutes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Conn {
@@ -34,7 +36,20 @@ pub enum Conn {
     Reconnecting,
 }
 
+#[cfg(test)]
 pub fn tray_view(conn: &Conn, server_host: Option<&str>, monitors: &Monitors, unread: usize) -> TrayView {
+    tray_view_at(conn, server_host, monitors, unread, &Mutes::default(), &HashMap::new(), chrono::Utc::now())
+}
+
+pub fn tray_view_at(
+    conn: &Conn,
+    server_host: Option<&str>,
+    monitors: &Monitors,
+    unread: usize,
+    mutes: &Mutes,
+    app_names: &HashMap<i64, String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> TrayView {
     let status_line = match conn {
         Conn::Connected => format!("Connected to {}", server_host.unwrap_or("Gotify")),
         Conn::Reconnecting => "Reconnecting…".into(),
@@ -45,18 +60,58 @@ pub fn tray_view(conn: &Conn, server_host: Option<&str>, monitors: &Monitors, un
     };
     // Without a working login the old "down" list may be stale; don't show it.
     let online = matches!(conn, Conn::Connected | Conn::Reconnecting | Conn::Connecting);
+    let monitor_muted = |name: &str| mutes.is_target_muted(&MuteTarget::Monitor(name.to_string()), now);
     let down: Vec<DownEntry> = down_list(monitors)
         .into_iter()
-        .filter(|_| online)
+        .filter(|(name, _)| online && !monitor_muted(name))
         .map(|(name, r)| DownEntry { monitor: name.to_string(), message_id: r.message_id, since: r.since })
         .collect();
+    let muted: Vec<MutedEntry> = if online {
+        mutes
+            .list(now)
+            .into_iter()
+            .map(|(target, until)| {
+                let (name, down) = match &target {
+                    MuteTarget::Monitor(name) => (
+                        name.clone(),
+                        monitors.get(name).filter(|r| r.status == KumaStatus::Down).map(|r| (r.message_id, r.since)),
+                    ),
+                    MuteTarget::App(id) => (app_names.get(id).cloned().unwrap_or_else(|| format!("App {id}")), None),
+                };
+                MutedEntry { target, name, down, until }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // A known outage stays visible while reconnecting.
     let icon = match conn {
-        _ if !down.is_empty() && matches!(conn, Conn::Connected | Conn::Reconnecting | Conn::Connecting) => IconKind::Down,
+        _ if !down.is_empty() && online => IconKind::Down,
         Conn::Connected => IconKind::Ok,
         _ => IconKind::Offline,
     };
-    TrayView { icon, unread: unread > 0, status_line, down }
+    TrayView { icon, unread: unread > 0, status_line, down, muted }
+}
+
+/// Monitors whose mute just ended while still down, as messages to show
+/// again (so a real outage can't hide behind a forgotten mute).
+pub fn still_down_after_mute(ended: &[MuteTarget], monitors: &Monitors) -> Vec<Message> {
+    ended
+        .iter()
+        .filter_map(|target| match target {
+            MuteTarget::Monitor(name) => monitors.get(name).filter(|r| r.status == KumaStatus::Down).map(|r| (name, r)),
+            MuteTarget::App(_) => None,
+        })
+        .map(|(name, r)| Message {
+            id: r.message_id,
+            appid: 0,
+            message: format!("[{name}] [🔴 Down] Still down — the mute has ended."),
+            title: None,
+            priority: 8,
+            date: r.since,
+            extras: None,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +120,8 @@ pub enum ServiceCall {
     Resync,
     ReloadConfig,
     MarkRead(i64),
+    /// None = unmute.
+    SetMute(MuteTarget, Option<MuteFor>),
 }
 
 pub struct SyncResult {
@@ -91,6 +148,8 @@ pub enum Event {
     Tick,
     /// The outage alert delay for this outage has passed.
     OutageCheck(u64),
+    /// The next mute end time may have passed.
+    MuteCheck(u64),
 }
 
 /// Starts the window process or a browser.
@@ -114,6 +173,8 @@ pub struct AppDeps<B: NotifyBackend> {
     pub sync_delay: Duration,
     /// How long the connection may be down before "Can't reach Gotify".
     pub outage_alert_after: Duration,
+    /// Shared with the D-Bus service's `Mutes`.
+    pub shared_mutes: Arc<std::sync::Mutex<Mutes>>,
 }
 
 pub struct App<B: NotifyBackend> {
@@ -136,6 +197,7 @@ pub struct App<B: NotifyBackend> {
     last_sync: Option<Instant>,
     login_expired_notified: bool,
     outage: Outage,
+    mute_seq: u64,
 }
 
 fn args_for_message(id: Option<i64>) -> Vec<String> {
@@ -166,12 +228,15 @@ impl<B: NotifyBackend> App<B> {
             last_sync: None,
             login_expired_notified: false,
             outage: Outage::default(),
+            mute_seq: 0,
         };
         (app, tx, view_rx)
     }
 
     pub async fn run(mut self) {
         self.deps.last_read.store(self.state.last_read_id.unwrap_or(0), Ordering::Relaxed);
+        *self.deps.shared_mutes.lock().expect("mutes lock") = self.state.mutes.clone();
+        self.schedule_mute_check();
         self.start().await;
         while let Some(event) = self.rx.recv().await {
             if !self.handle(event).await {
@@ -185,7 +250,15 @@ impl<B: NotifyBackend> App<B> {
     fn publish(&self) {
         let host = self.config.as_ref().and_then(|c| c.server_url.host_str().map(str::to_string));
         let unread = unread_count(self.state.last_read_id, self.message_ids.iter().copied());
-        let view = tray_view(&self.conn, host.as_deref(), &self.state.monitors, unread);
+        let view = tray_view_at(
+            &self.conn,
+            host.as_deref(),
+            &self.state.monitors,
+            unread,
+            &self.state.mutes,
+            &self.apps,
+            chrono::Utc::now(),
+        );
         self.view.send_if_modified(|old| {
             let changed = *old != view;
             *old = view;
@@ -198,6 +271,7 @@ impl<B: NotifyBackend> App<B> {
             eprintln!("gotify-tray: can't save state: {e}");
         }
         self.deps.last_read.store(self.state.last_read_id.unwrap_or(0), Ordering::Relaxed);
+        *self.deps.shared_mutes.lock().expect("mutes lock") = self.state.mutes.clone();
     }
 
     fn stop_connection(&mut self) {
@@ -353,7 +427,8 @@ impl<B: NotifyBackend> App<B> {
             self.state.last_read_id = None;
         }
         let apps = self.apps.clone();
-        let (notice, last) = missed_notice(self.state.last_notified_id, &result.messages, |id| apps.get(&id).cloned());
+        let (mutes, now) = (self.state.mutes.clone(), chrono::Utc::now());
+        let (notice, last) = missed_notice(self.state.last_notified_id, &result.messages, |id| apps.get(&id).cloned(), |m| mutes.is_muted(m, now));
         let first_run = self.state.last_notified_id.is_none();
         if let Some(old) = self.state.last_notified_id {
             let missed: Vec<Message> = result.messages.iter().filter(|m| m.id > old).cloned().collect();
@@ -381,12 +456,44 @@ impl<B: NotifyBackend> App<B> {
         self.save();
     }
 
+    fn set_mute(&mut self, target: MuteTarget, duration: Option<MuteFor>) {
+        match duration {
+            Some(d) => self.state.mutes.mute(target, d, chrono::Utc::now()),
+            None => self.state.mutes.unmute(&target),
+        }
+        self.save();
+        self.schedule_mute_check();
+    }
+
+    /// Wakes up when the next mute ends (recomputed from the wall clock, so
+    /// suspend doesn't delay it: Wake and Tick call this again).
+    fn schedule_mute_check(&mut self) {
+        self.mute_seq += 1;
+        if let Some(end) = self.state.mutes.next_expiry() {
+            let delay = (end - chrono::Utc::now()).to_std().unwrap_or(Duration::ZERO);
+            self.schedule(delay, Event::MuteCheck(self.mute_seq));
+        }
+    }
+
+    async fn on_mute_check(&mut self) {
+        let ended = self.state.mutes.take_expired(chrono::Utc::now());
+        if !ended.is_empty() {
+            self.save();
+            for msg in still_down_after_mute(&ended, &self.state.monitors) {
+                self.deps.notifier.show_message(&msg, None).await;
+            }
+        }
+        self.schedule_mute_check();
+    }
+
     async fn on_live(&mut self, msg: Message) {
         apply_live(&mut self.state.monitors, &msg);
         self.message_ids.insert(msg.id);
         if self.state.last_notified_id.is_some_and(|last| msg.id > last) {
-            let app = self.apps.get(&msg.appid).cloned();
-            self.deps.notifier.show_message(&msg, app.as_deref()).await;
+            if !self.state.mutes.is_muted(&msg, chrono::Utc::now()) {
+                let app = self.apps.get(&msg.appid).cloned();
+                self.deps.notifier.show_message(&msg, app.as_deref()).await;
+            }
             self.state.last_notified_id = Some(msg.id);
         }
         self.save();
@@ -463,6 +570,7 @@ impl<B: NotifyBackend> App<B> {
                 }
             }
             Event::Wake => {
+                self.schedule_mute_check();
                 // Time asleep doesn't count towards the outage alert.
                 if let Some(seq) = self.outage.restart_clock() {
                     self.schedule(self.deps.outage_alert_after, Event::OutageCheck(seq));
@@ -472,7 +580,12 @@ impl<B: NotifyBackend> App<B> {
                     self.connect();
                 }
             }
-            Event::Tick => self.resync_now(),
+            Event::Tick => {
+                self.schedule_mute_check();
+                self.resync_now();
+            }
+            Event::MuteCheck(seq) if seq == self.mute_seq => self.on_mute_check().await,
+            Event::MuteCheck(_) => {}
             Event::WindowExited => self.resync_now(),
             Event::Tray(cmd) => match cmd {
                 TrayCommand::MenuOpened => {
@@ -486,6 +599,8 @@ impl<B: NotifyBackend> App<B> {
                     monitors::clear(&mut self.state.monitors, &name);
                     self.save();
                 }
+                TrayCommand::Mute(target, duration) => self.set_mute(target, Some(duration)),
+                TrayCommand::Unmute(target) => self.set_mute(target, None),
                 TrayCommand::Quit => return false,
             },
             Event::Notifier(NotifierSignal::Action(id, key)) => {
@@ -502,6 +617,7 @@ impl<B: NotifyBackend> App<B> {
                     self.backoff.reset();
                     self.start().await;
                 }
+                ServiceCall::SetMute(target, duration) => self.set_mute(target, duration),
                 ServiceCall::MarkRead(id) => {
                     self.state.last_read_id = Some(self.state.last_read_id.map_or(id, |old| old.max(id)));
                     self.save();
@@ -518,12 +634,40 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use gotify_core::kuma::KumaStatus;
     use gotify_core::monitors::MonitorRecord;
+    use gotify_core::mutes::{MuteFor, MuteTarget, Mutes};
 
     fn monitors_with_down() -> Monitors {
         Monitors::from([(
             "web01".to_string(),
             MonitorRecord { status: KumaStatus::Down, message_id: 4, since: Utc.timestamp_opt(60, 0).unwrap() },
         )])
+    }
+
+    #[test]
+    fn ended_mutes_of_monitors_still_down_are_announced_again() {
+        let mut monitors = monitors_with_down(); // web01 down (message 4)
+        monitors.insert(
+            "db".into(),
+            MonitorRecord { status: KumaStatus::Up, message_id: 5, since: Utc.timestamp_opt(60, 0).unwrap() },
+        );
+        let ended = [MuteTarget::Monitor("web01".into()), MuteTarget::Monitor("db".into()), MuteTarget::App(3)];
+        let again = still_down_after_mute(&ended, &monitors);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].id, 4);
+        assert_eq!(again[0].message, "[web01] [🔴 Down] Still down — the mute has ended.");
+    }
+
+    #[test]
+    fn muted_outage_is_not_red_and_listed_as_muted() {
+        let now = Utc.timestamp_opt(120, 0).unwrap();
+        let mut mutes = Mutes::default();
+        mutes.mute(MuteTarget::Monitor("web01".into()), MuteFor::Day, now);
+        let v = tray_view_at(&Conn::Connected, Some("h"), &monitors_with_down(), 0, &mutes, &HashMap::new(), now);
+        assert_eq!(v.icon, IconKind::Ok);
+        assert!(v.down.is_empty());
+        assert_eq!(v.muted.len(), 1);
+        assert_eq!(v.muted[0].name, "web01");
+        assert_eq!(v.muted[0].down.map(|(id, _)| id), Some(4));
     }
 
     #[test]

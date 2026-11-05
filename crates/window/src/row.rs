@@ -39,7 +39,13 @@ fn is_alert(msg: &Message) -> bool {
 
 /// Builds a list row. `show_app` adds the app name (when there are several
 /// apps); `on_delete` is called with the message id.
-pub fn message_row(msg: &Message, app_name: Option<&str>, show_app: bool, on_delete: impl Fn(i64) + 'static) -> gtk::ListBoxRow {
+pub fn message_row(
+    msg: &Message,
+    app_name: Option<&str>,
+    show_app: bool,
+    extra: Option<&gtk::Widget>,
+    on_delete: impl Fn(i64) + 'static,
+) -> gtk::ListBoxRow {
     let title = gtk::Label::builder()
         .label(row_title(msg, app_name))
         .xalign(0.0)
@@ -69,6 +75,9 @@ pub fn message_row(msg: &Message, app_name: Option<&str>, show_app: bool, on_del
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     top.append(&title);
     top.append(&meta);
+    if let Some(extra) = extra {
+        top.append(extra);
+    }
     top.append(&delete);
 
     let body = gtk::Label::builder()

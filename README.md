@@ -89,6 +89,17 @@ it sends a new message. Deleting a monitor's Down message also clears it.
 The app checks with the server when the menu opens, when the message window
 closes, and every 15 minutes.
 
+## Mute
+
+Too noisy? Mute a monitor **for 1 day**, **for 1 week** or **until unmuted**:
+from the tray menu (each entry under "Down right now") or with the bell button
+on a message in the window (Kuma messages mute their monitor, other messages
+their whole app). A muted monitor shows no pop-ups and doesn't turn the tray
+icon red; it's listed under **Muted** in the tray menu with its state and when
+the mute ends, and its messages stay in the window. If a mute ends while the
+monitor is still down, you get its Down notification again. Mutes are stored on
+this computer only.
+
 ## Search
 
 In the message window press **Ctrl+F**, click the search icon, or just start
@@ -121,6 +132,8 @@ tests/seed.sh send 8 "[web01] [🔴 Down] test"                  # send a Kuma-s
 tests/seed.sh down                     # stop and discard the test server
 ```
 
-Integration tests never touch a real server. To run a test copy of the window
-while your own is open, set `GOTIFY_TRAY_WINDOW_APP_ID=dev.gotifytray.Test`. `examples/inspect.rs` does a
+Integration tests never touch a real server. To run test copies next to your own,
+set `GOTIFY_TRAY_WINDOW_APP_ID=dev.gotifytray.TestWindow` and
+`GOTIFY_TRAY_BUS_NAME=dev.gotifytray.Test` (plus separate `XDG_CONFIG_HOME` /
+`XDG_STATE_HOME`), so they never talk to your running tray. `examples/inspect.rs` does a
 read-only check against a real one (`GOTIFY_URL`, `GOTIFY_TOKEN`).

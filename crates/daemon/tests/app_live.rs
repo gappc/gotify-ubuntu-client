@@ -9,7 +9,8 @@ use gotify_core::api::{GotifyClient, create_client, endpoint};
 use gotify_core::files::{Config, Paths, State, save_config, save_state};
 use gotify_tray::app::{App, AppDeps, Event, Launcher, ServiceCall};
 use gotify_tray::notify::{NotifyBackend, NotifyRequest, Notifier};
-use gotify_tray::tray::TrayView;
+use gotify_core::mutes::{MuteFor, MuteTarget};
+use gotify_tray::tray::{TrayCommand, TrayView};
 use tokio::sync::watch;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -106,6 +107,7 @@ async fn start_via(
         last_read: Arc::new(AtomicI64::new(0)),
         sync_delay,
         outage_alert_after,
+        shared_mutes: Default::default(),
     };
     let (app, tx, view) = App::new(deps);
     tokio::spawn(app.run());
@@ -225,4 +227,25 @@ async fn outage_alert_and_all_clear() {
     r.tx.send(Event::Wake).unwrap(); // skip the backoff wait
     wait_for(&mut r.view, |v| v.status_line.starts_with("Connected")).await;
     assert_eq!(r.sent.summaries(), ["Can't reach Gotify", "Connected to Gotify again"]);
+}
+
+#[tokio::test]
+async fn muted_monitor_stays_quiet() {
+    let Some(base) = base() else { return };
+    let _guard = SERIAL.lock().await;
+    let (_, _, newest) = setup(&base).await;
+    let mut r = start(&base, newest, Duration::ZERO).await;
+    wait_for(&mut r.view, |v| v.status_line.starts_with("Connected")).await;
+    let quiet = MuteTarget::Monitor("quiet-mon".into());
+    r.tx.send(Event::Tray(TrayCommand::Mute(quiet.clone(), MuteFor::Day))).unwrap();
+    send_as_kuma(&base, "[quiet-mon] [🔴 Down] muted", 8).await;
+    send_as_kuma(&base, "[loud-mon] [🔴 Down] not muted", 8).await;
+    wait_for(&mut r.view, |v| v.down.iter().any(|d| d.monitor == "loud-mon")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(r.sent.summaries(), ["🔴 loud-mon is down"]);
+    let v = r.view.borrow().clone();
+    assert!(!v.down.iter().any(|d| d.monitor == "quiet-mon"), "muted monitor must not turn the tray red");
+    assert!(v.muted.iter().any(|m| m.target == quiet && m.down.is_some()));
+    r.tx.send(Event::Tray(TrayCommand::Unmute(quiet))).unwrap();
+    wait_for(&mut r.view, |v| v.down.iter().any(|d| d.monitor == "quiet-mon")).await;
 }

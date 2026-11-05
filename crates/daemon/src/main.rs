@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use gotify_core::consts::RESYNC_INTERVAL;
 use gotify_core::files::Paths;
-use gotify_core::ipc::{BUS_NAME, GotifyTrayProxy, OBJECT_PATH};
+use gotify_core::ipc::OBJECT_PATH;
 use gotify_tray::app::{App, AppDeps, Event};
 use gotify_tray::launcher::ProcessLauncher;
 use gotify_tray::notify::{DbusBackend, Notifier};
@@ -34,6 +34,7 @@ async fn run() -> zbus::Result<()> {
     let backend = DbusBackend::new(&conn).await?;
     let notifier_signals = backend.signals().await?;
     let last_read = Arc::new(AtomicI64::new(0));
+    let shared_mutes = Arc::new(std::sync::Mutex::new(gotify_core::mutes::Mutes::default()));
     let deps = AppDeps {
         paths: Paths::from_env(),
         notifier: Notifier::new(backend),
@@ -42,19 +43,20 @@ async fn run() -> zbus::Result<()> {
         last_read: last_read.clone(),
         sync_delay: Duration::ZERO,
         outage_alert_after: gotify_core::consts::OUTAGE_ALERT_AFTER,
+        shared_mutes: shared_mutes.clone(),
     };
     let (app, tx, mut view) = App::new(deps);
 
     // Serve the interface before taking the name, so a second start that
     // finds the name can always call it.
-    conn.object_server().at(OBJECT_PATH, Service { tx: tx.clone(), last_read }).await?;
+    conn.object_server().at(OBJECT_PATH, Service { tx: tx.clone(), last_read, mutes: shared_mutes }).await?;
     let owner = matches!(
-        conn.request_name_with_flags(BUS_NAME, RequestNameFlags::DO_NOT_QUEUE).await,
+        conn.request_name_with_flags(gotify_core::ipc::bus_name(), RequestNameFlags::DO_NOT_QUEUE).await,
         Ok(RequestNameReply::PrimaryOwner)
     );
     if !owner {
         // Already running: open its window instead.
-        GotifyTrayProxy::new(&conn).await?.show_window(0).await?;
+        gotify_core::ipc::tray_proxy(&conn).await?.show_window(0).await?;
         return Ok(());
     }
 

@@ -15,10 +15,13 @@ const SUMMARY_LINES: usize = 3;
 
 /// `newest_first` may contain already-notified messages; only ids above
 /// `last_notified` count. On the first run (`None`) nothing is notified.
+/// `skip` excludes messages from notifying (e.g. muted ones); they still
+/// advance the marker.
 pub fn missed_notice(
     last_notified: Option<i64>,
     newest_first: &[Message],
     app_name: impl Fn(i64) -> Option<String>,
+    skip: impl Fn(&Message) -> bool,
 ) -> (MissedNotice, Option<i64>) {
     let newest = newest_first.iter().map(|m| m.id).max();
     let new_last = match (last_notified, newest) {
@@ -31,7 +34,7 @@ pub fn missed_notice(
 
     let mut missed: Vec<(&Message, Urgency)> = newest_first
         .iter()
-        .filter(|m| m.id > last)
+        .filter(|m| m.id > last && !skip(m))
         .filter_map(|m| match delivery_for(m) {
             Delivery::Notify(u) => Some((m, u)),
             Delivery::Silent => None,
@@ -88,7 +91,7 @@ mod tests {
 
     #[test]
     fn first_run_notifies_nothing() {
-        let (notice, last) = missed_notice(None, &[m(5, 8, "a"), m(4, 8, "b")], names);
+        let (notice, last) = missed_notice(None, &[m(5, 8, "a"), m(4, 8, "b")], names, |_| false);
         assert_eq!(notice, MissedNotice::None);
         assert_eq!(last, Some(5));
     }
@@ -97,7 +100,7 @@ mod tests {
     fn first_run_with_no_messages_starts_marker() {
         // An empty server must still start the marker, or live messages
         // would never be notified.
-        assert_eq!(missed_notice(None, &[], names), (MissedNotice::None, Some(0)));
+        assert_eq!(missed_notice(None, &[], names, |_| false), (MissedNotice::None, Some(0)));
     }
 
     #[test]
@@ -111,14 +114,14 @@ mod tests {
 
     #[test]
     fn nothing_new() {
-        let (notice, last) = missed_notice(Some(5), &[m(5, 8, "a")], names);
+        let (notice, last) = missed_notice(Some(5), &[m(5, 8, "a")], names, |_| false);
         assert_eq!(notice, MissedNotice::None);
         assert_eq!(last, Some(5));
     }
 
     #[test]
     fn single_missed() {
-        let (notice, last) = missed_notice(Some(4), &[m(5, 8, "a"), m(4, 8, "b")], names);
+        let (notice, last) = missed_notice(Some(4), &[m(5, 8, "a"), m(4, 8, "b")], names, |_| false);
         assert_eq!(notice, MissedNotice::Single(m(5, 8, "a")));
         assert_eq!(last, Some(5));
     }
@@ -126,7 +129,7 @@ mod tests {
     #[test]
     fn summary_of_five() {
         let msgs: Vec<_> = (6..=10).rev().map(|i| m(i, 5, &format!("msg {i}"))).collect();
-        let (notice, last) = missed_notice(Some(5), &msgs, names);
+        let (notice, last) = missed_notice(Some(5), &msgs, names, |_| false);
         let MissedNotice::Summary { count, urgency, lines } = notice else { panic!("{notice:?}") };
         assert_eq!(count, 5);
         assert_eq!(urgency, Urgency::Normal);
@@ -137,7 +140,7 @@ mod tests {
     #[test]
     fn summary_is_critical_if_any_down() {
         let msgs = [m(3, 1, "low"), m(2, 1, "[web01] [🔴 Down] timeout")];
-        let (notice, _) = missed_notice(Some(1), &msgs, names);
+        let (notice, _) = missed_notice(Some(1), &msgs, names, |_| false);
         let MissedNotice::Summary { urgency, lines, .. } = notice else { panic!() };
         assert_eq!(urgency, Urgency::Critical);
         assert_eq!(lines[1], "web01: timeout");
@@ -145,9 +148,17 @@ mod tests {
 
     #[test]
     fn silent_messages_not_counted_but_advance_last_notified() {
-        let (notice, last) = missed_notice(Some(1), &[m(3, 0, "quiet"), m(2, 5, "loud")], names);
+        let (notice, last) = missed_notice(Some(1), &[m(3, 0, "quiet"), m(2, 5, "loud")], names, |_| false);
         assert!(matches!(notice, MissedNotice::Single(ref s) if s.id == 2));
         assert_eq!(last, Some(3));
+    }
+
+    #[test]
+    fn muted_messages_never_count_but_advance_the_marker() {
+        let msgs = [m(4, 8, "[noisy] [🔴 Down] x"), m(3, 8, "[noisy] [✅ Up] y")];
+        let (notice, last) = missed_notice(Some(1), &msgs, names, |msg| msg.message.contains("noisy"));
+        assert_eq!(notice, MissedNotice::None);
+        assert_eq!(last, Some(4));
     }
 
     #[test]

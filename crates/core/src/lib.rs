@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod kuma;
 pub mod model;
 pub mod monitors;
+pub mod mutes;
 pub mod rules;
 pub mod secret;
 pub mod stream;

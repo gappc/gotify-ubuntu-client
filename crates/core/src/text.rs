@@ -95,6 +95,21 @@ where
     }
 }
 
+/// For "muted until …": "21:00" today, "Fri 21:00" within a week, else the date.
+pub fn until_label<Tz: TimeZone>(t: DateTime<Tz>, now: DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let days = (t.date_naive() - now.date_naive()).num_days();
+    if days <= 0 {
+        t.format("%H:%M").to_string()
+    } else if days <= 6 {
+        t.format("%a %H:%M").to_string()
+    } else {
+        t.format("%Y-%m-%d").to_string()
+    }
+}
+
 /// For "down since …": "14:32" today, "Mon 14:32" this week, else the date.
 pub fn since_label<Tz: TimeZone>(t: DateTime<Tz>, now: DateTime<Tz>) -> String
 where
@@ -147,6 +162,14 @@ mod tests {
         assert_eq!(r(Utc.with_ymd_and_hms(2026, 11, 4, 1, 0, 0).unwrap()), "yesterday");
         assert_eq!(r(Utc.with_ymd_and_hms(2026, 10, 12, 9, 0, 0).unwrap()), "12 Oct");
         assert_eq!(r(Utc.with_ymd_and_hms(2025, 10, 12, 9, 0, 0).unwrap()), "12 Oct 2025");
+    }
+
+    #[test]
+    fn until_label_formats() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 5, 18, 0, 0).unwrap(); // a Thursday
+        assert_eq!(until_label(Utc.with_ymd_and_hms(2026, 11, 5, 21, 0, 0).unwrap(), now), "21:00");
+        assert_eq!(until_label(Utc.with_ymd_and_hms(2026, 11, 6, 21, 0, 0).unwrap(), now), "Fri 21:00");
+        assert_eq!(until_label(Utc.with_ymd_and_hms(2026, 11, 12, 21, 0, 0).unwrap(), now), "2026-11-12");
     }
 
     #[test]

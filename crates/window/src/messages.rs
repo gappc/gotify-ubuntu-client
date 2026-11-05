@@ -13,9 +13,11 @@ use gotify_core::model::{Application, Message, PagedMessages};
 use gotify_core::secret::load_token;
 use gotify_core::stream::{MessageStream, connect_stream};
 
-use crate::filter::{Search, matches};
+use crate::filter::{MuteTarget, Search, matches, mute_target, mute_wire};
+use gotify_core::mutes::MuteFor;
+use gotify_core::text::until_label;
 use crate::row::{message_row, row_message_id};
-use crate::rt::{DaemonCall, daemon_last_read, notify_daemon, runtime, spawn_ui};
+use crate::rt::{DaemonCall, MuteList, daemon_last_read, daemon_mutes, daemon_set_mute, notify_daemon, runtime, spawn_ui};
 use crate::settings::open_settings;
 
 /// Why there is nothing to show.
@@ -43,6 +45,7 @@ struct Loaded {
     last_read: Option<i64>,
     /// Opened before the first page was fetched, so no message falls between.
     stream: Option<MessageStream>,
+    mutes: MuteList,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -82,6 +85,9 @@ struct Model {
     search: Search,
     /// Full history of the current app filter, loaded when searching.
     history: Option<Vec<Message>>,
+    mutes: MuteList,
+    /// Bell buttons of the listed rows, to update when a mute changes.
+    bells: Vec<(MuteTarget, String, gtk::MenuButton)>,
 }
 
 impl Model {
@@ -355,7 +361,8 @@ fn reload(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
         let apps = client.applications().await?;
         let first = client.messages_page(None, None).await?;
         let last_read = daemon_last_read().await;
-        Ok(Loaded { client, apps, first, last_read, stream })
+        let mutes = daemon_mutes().await;
+        Ok(Loaded { client, apps, first, last_read, stream, mutes })
     };
     let (ui, model) = (ui.clone(), model.clone());
     spawn_ui(work, move |result| match result {
@@ -375,6 +382,7 @@ fn reload(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
                 m.client = Some(loaded.client);
                 m.filter = None;
                 m.history = None;
+                m.mutes = loaded.mutes;
             }
             fill_sidebar(&ui, &model);
             if model.borrow().search.is_active() {
@@ -445,8 +453,16 @@ fn add_row(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>, msg: &Message, at_top: bool)
     let name = app_name(&m, msg.appid);
     let several = m.apps.len() > 1;
     drop(m);
+    let target = mute_target(msg);
+    let target_name = match &target {
+        MuteTarget::Monitor(monitor) => monitor.clone(),
+        MuteTarget::App(_) => name.clone().unwrap_or_else(|| "this app".into()),
+    };
+    let bell = gtk::MenuButton::builder().valign(gtk::Align::Start).css_classes(["flat", "circular"]).build();
+    update_bell(ui, model, &bell, &target, &target_name);
+    model.borrow_mut().bells.push((target, target_name, bell.clone()));
     let (ui2, model2) = (ui.clone(), model.clone());
-    let row = message_row(msg, name.as_deref(), several, move |id| delete_one(&ui2, &model2, id));
+    let row = message_row(msg, name.as_deref(), several, Some(bell.upcast_ref()), move |id| delete_one(&ui2, &model2, id));
     if at_top {
         ui.list.prepend(&row);
     } else {
@@ -460,6 +476,7 @@ fn show_page(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>, page: PagedMessages, fresh
         while let Some(row) = ui.list.row_at_index(0) {
             ui.list.remove(&row);
         }
+        model.borrow_mut().bells.clear();
     }
     let exhausted = page.paging.next.as_deref().is_none_or(str::is_empty) || page.messages.is_empty();
     model.borrow_mut().next_since = (!exhausted).then_some(page.paging.since);
@@ -537,6 +554,7 @@ fn show_search_results(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
     while let Some(row) = ui.list.row_at_index(0) {
         ui.list.remove(&row);
     }
+    model.borrow_mut().bells.clear();
     let found: Vec<Message> = {
         let m = model.borrow();
         m.history
@@ -620,6 +638,60 @@ fn try_focus(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
         model.borrow_mut().focus = None;
         toast(ui, "That message no longer exists.");
     }
+}
+
+/// Sets a row's bell icon, tooltip and menu from the current mutes.
+fn update_bell(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>, bell: &gtk::MenuButton, target: &MuteTarget, name: &str) {
+    let until = model.borrow().mutes.iter().find(|(t, _)| t == target).map(|(_, until)| *until);
+    let menu = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+    let heading = gtk::Label::builder().xalign(0.0).margin_bottom(4).css_classes(["heading"]).build();
+    menu.append(&heading);
+    let choice = |label: &str, duration: Option<MuteFor>| {
+        let button = gtk::Button::builder().label(label).css_classes(["flat"]).build();
+        button.child().and_downcast::<gtk::Label>().inspect(|l| l.set_xalign(0.0));
+        let (ui, model, bell, target) = (ui.clone(), model.clone(), bell.clone(), target.clone());
+        button.connect_clicked(move |_| {
+            bell.popdown();
+            let (kind, wire_target) = mute_wire(&target);
+            let wire_duration = duration.map_or("", MuteFor::wire);
+            let (ui, model) = (ui.clone(), model.clone());
+            spawn_ui(
+                async move { daemon_set_mute(kind, &wire_target, wire_duration).await },
+                move |result| match result {
+                    Ok(list) => {
+                        model.borrow_mut().mutes = list;
+                        let bells = model.borrow().bells.clone();
+                        for (target, name, bell) in bells {
+                            update_bell(&ui, &model, &bell, &target, &name);
+                        }
+                    }
+                    Err(text) => toast(&ui, &text),
+                },
+            );
+        });
+        button
+    };
+    match until {
+        Some(until) => {
+            bell.set_icon_name("notifications-disabled-symbolic");
+            let text = match until {
+                Some(u) => format!("{name} is muted until {}", until_label(u.with_timezone(&chrono::Local), chrono::Local::now())),
+                None => format!("{name} is muted"),
+            };
+            bell.set_tooltip_text(Some(&text));
+            heading.set_label(&text);
+            menu.append(&choice("Unmute", None));
+        }
+        None => {
+            bell.set_icon_name("preferences-system-notifications-symbolic");
+            bell.set_tooltip_text(Some(&format!("Mute {name}")));
+            heading.set_label(&format!("Mute {name}"));
+            for d in MuteFor::ALL {
+                menu.append(&choice(d.label(), Some(d)));
+            }
+        }
+    }
+    bell.set_popover(Some(&gtk::Popover::builder().child(&menu).build()));
 }
 
 fn toast(ui: &Rc<Ui>, text: &str) {

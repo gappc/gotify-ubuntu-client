@@ -1,7 +1,8 @@
 //! Tray icon (StatusNotifierItem via ksni) and its menu.
 
 use chrono::{DateTime, Local, Utc};
-use gotify_core::text::since_label;
+use gotify_core::mutes::{MuteFor, MuteTarget};
+use gotify_core::text::{since_label, until_label};
 use ksni::menu::{StandardItem, SubMenu};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -15,17 +16,28 @@ pub struct DownEntry {
     pub since: DateTime<Utc>,
 }
 
+/// A muted monitor or app, with its current outage (message id, since) if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutedEntry {
+    pub target: MuteTarget,
+    pub name: String,
+    pub down: Option<(i64, DateTime<Utc>)>,
+    /// None = until unmuted.
+    pub until: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayView {
     pub icon: IconKind,
     pub unread: bool,
     pub status_line: String,
     pub down: Vec<DownEntry>,
+    pub muted: Vec<MutedEntry>,
 }
 
 impl Default for TrayView {
     fn default() -> Self {
-        TrayView { icon: IconKind::Offline, unread: false, status_line: "Starting…".into(), down: Vec::new() }
+        TrayView { icon: IconKind::Offline, unread: false, status_line: "Starting…".into(), down: Vec::new(), muted: Vec::new() }
     }
 }
 
@@ -34,6 +46,8 @@ pub enum TrayCommand {
     ShowWindow(Option<i64>),
     Settings,
     ClearMonitor(String),
+    Mute(MuteTarget, MuteFor),
+    Unmute(MuteTarget),
     MenuOpened,
     Quit,
 }
@@ -52,13 +66,39 @@ pub fn menu_model(view: &TrayView, now: DateTime<Local>) -> Vec<MenuEntry> {
     if !view.down.is_empty() {
         menu.push(MenuEntry::Label("Down right now".into()));
         for d in &view.down {
+            let target = MuteTarget::Monitor(d.monitor.clone());
+            let mut items = vec![
+                MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(d.message_id))),
+                MenuEntry::Separator,
+            ];
+            items.extend(
+                MuteFor::ALL.map(|m| MenuEntry::Item(m.label().into(), TrayCommand::Mute(target.clone(), m))),
+            );
+            items.push(MenuEntry::Separator);
+            items.push(MenuEntry::Item("Clear".into(), TrayCommand::ClearMonitor(d.monitor.clone())));
             menu.push(MenuEntry::Sub(
                 format!("{} — down since {}", d.monitor, since_label(d.since.with_timezone(&Local), now)),
-                vec![
-                    MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(d.message_id))),
-                    MenuEntry::Item("Clear".into(), TrayCommand::ClearMonitor(d.monitor.clone())),
-                ],
+                items,
             ));
+        }
+        menu.push(MenuEntry::Separator);
+    }
+    if !view.muted.is_empty() {
+        menu.push(MenuEntry::Label("Muted".into()));
+        for m in &view.muted {
+            let mut label = m.name.clone();
+            let mut items = Vec::new();
+            label.push_str(" — ");
+            if let Some((id, since)) = m.down {
+                label.push_str(&format!("down since {}, ", since_label(since.with_timezone(&Local), now)));
+                items.push(MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(id))));
+            }
+            match m.until {
+                Some(until) => label.push_str(&format!("muted until {}", until_label(until.with_timezone(&Local), now))),
+                None => label.push_str("muted"),
+            }
+            items.push(MenuEntry::Item("Unmute".into(), TrayCommand::Unmute(m.target.clone())));
+            menu.push(MenuEntry::Sub(label, items));
         }
         menu.push(MenuEntry::Separator);
     }
@@ -140,7 +180,7 @@ mod tests {
     use chrono::{Local, TimeZone};
 
     fn view(down: Vec<DownEntry>) -> TrayView {
-        TrayView { icon: IconKind::Ok, unread: false, status_line: "Connected to gotify.example.com".into(), down }
+        TrayView { icon: IconKind::Ok, unread: false, status_line: "Connected to gotify.example.com".into(), down, muted: vec![] }
     }
 
     #[test]
@@ -148,6 +188,41 @@ mod tests {
         // AppIndicator treats "_x" as a keyboard mnemonic and drops the "_".
         assert_eq!(menu_label("db_primary — down since 14:32"), "db__primary — down since 14:32");
         assert_eq!(menu_label("plain"), "plain");
+    }
+
+    fn web() -> MuteTarget {
+        MuteTarget::Monitor("web01".into())
+    }
+
+    #[test]
+    fn muted_section_shows_state_and_end() {
+        let now = Local.with_ymd_and_hms(2026, 11, 5, 18, 0, 0).unwrap();
+        let mut v = view(vec![]);
+        v.muted = vec![
+            MutedEntry {
+                target: web(),
+                name: "web01".into(),
+                down: Some((42, Local.with_ymd_and_hms(2026, 11, 5, 14, 32, 0).unwrap().to_utc())),
+                until: Some(Local.with_ymd_and_hms(2026, 11, 6, 18, 0, 0).unwrap().to_utc()),
+            },
+            MutedEntry { target: MuteTarget::App(3), name: "CI".into(), down: None, until: None },
+        ];
+        let menu = menu_model(&v, now);
+        let at = menu.iter().position(|e| *e == MenuEntry::Label("Muted".into())).unwrap();
+        assert_eq!(
+            menu[at + 1],
+            MenuEntry::Sub(
+                "web01 — down since 14:32, muted until Fri 18:00".into(),
+                vec![
+                    MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(42))),
+                    MenuEntry::Item("Unmute".into(), TrayCommand::Unmute(web())),
+                ]
+            )
+        );
+        assert_eq!(
+            menu[at + 2],
+            MenuEntry::Sub("CI — muted".into(), vec![MenuEntry::Item("Unmute".into(), TrayCommand::Unmute(MuteTarget::App(3)))])
+        );
     }
 
     #[test]
@@ -173,6 +248,11 @@ mod tests {
                 "web01 — down since 14:32".into(),
                 vec![
                     MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(42))),
+                    MenuEntry::Separator,
+                    MenuEntry::Item("Mute for 1 day".into(), TrayCommand::Mute(web(), MuteFor::Day)),
+                    MenuEntry::Item("Mute for 1 week".into(), TrayCommand::Mute(web(), MuteFor::Week)),
+                    MenuEntry::Item("Mute until unmuted".into(), TrayCommand::Mute(web(), MuteFor::Forever)),
+                    MenuEntry::Separator,
                     MenuEntry::Item("Clear".into(), TrayCommand::ClearMonitor("web01".into())),
                 ]
             )

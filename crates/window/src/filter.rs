@@ -2,6 +2,7 @@
 
 use gotify_core::kuma::{KumaStatus, parse_kuma};
 use gotify_core::model::Message;
+pub use gotify_core::mutes::MuteTarget;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Search {
@@ -32,6 +33,22 @@ pub fn matches(msg: &Message, app_name: Option<&str>, search: &Search) -> bool {
     let haystack = format!("{} {} {}", msg.title.as_deref().unwrap_or(""), msg.message, app_name.unwrap_or(""))
         .to_lowercase();
     search.text.split_whitespace().all(|word| haystack.contains(&word.to_lowercase()))
+}
+
+/// Kuma messages mute their monitor; anything else mutes its whole app.
+pub fn mute_target(msg: &Message) -> MuteTarget {
+    match parse_kuma(&msg.message) {
+        Some(e) => MuteTarget::Monitor(e.monitor),
+        None => MuteTarget::App(msg.appid),
+    }
+}
+
+/// (kind, target) as the background service's `SetMute` expects them.
+pub fn mute_wire(target: &MuteTarget) -> (&'static str, String) {
+    match target {
+        MuteTarget::Monitor(name) => ("monitor", name.clone()),
+        MuteTarget::App(id) => ("app", id.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +89,16 @@ mod tests {
         assert!(!matches(&m("Uptime-Kuma", "[web] [✅ Up] x", 8), None, &down));
         assert!(matches(&m("Deploy failed", "x", 8), None, &down)); // other high-priority = shown red too
         assert!(!matches(&m("Deploy ok", "x", 5), None, &down));
+    }
+
+    #[test]
+    fn kuma_messages_mute_their_monitor_others_their_app() {
+        let kuma = Message { appid: 3, ..m("Uptime-Kuma", "[web01] [🔴 Down] x", 8) };
+        assert_eq!(mute_target(&kuma), MuteTarget::Monitor("web01".into()));
+        let deploy = Message { appid: 7, ..m("Deploy", "ok", 5) };
+        assert_eq!(mute_target(&deploy), MuteTarget::App(7));
+        assert_eq!(mute_wire(&MuteTarget::Monitor("web01".into())), ("monitor", "web01".to_string()));
+        assert_eq!(mute_wire(&MuteTarget::App(7)), ("app", "7".to_string()));
     }
 
     #[test]

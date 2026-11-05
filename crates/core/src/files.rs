@@ -31,6 +31,8 @@ pub struct State {
     pub last_notified_id: Option<i64>,
     #[serde(default)]
     pub monitors: Monitors,
+    #[serde(default)]
+    pub mutes: crate::mutes::Mutes,
 }
 
 impl State {
@@ -198,6 +200,16 @@ mod tests {
         );
         save_state(&p, &s).unwrap();
         assert_eq!(load_state(&p), s);
+    }
+
+    #[test]
+    fn older_state_files_without_mutes_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::in_dir(dir.path());
+        std::fs::create_dir_all(p.state_file.parent().unwrap()).unwrap();
+        std::fs::write(&p.state_file, r#"{"last_read_id":4,"last_notified_id":9,"monitors":{}}"#).unwrap();
+        let s = load_state(&p);
+        assert_eq!((s.last_read_id, s.mutes), (Some(4), crate::mutes::Mutes::default()));
     }
 
     #[test]
