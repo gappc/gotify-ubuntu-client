@@ -20,6 +20,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 oo7 = { version = "0.7", default-features = false, features = ["tokio", "native_crypto"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+zbus = { version = "6", default-features = false, features = ["tokio"] }
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 tempfile = "3"
 wiremock = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }

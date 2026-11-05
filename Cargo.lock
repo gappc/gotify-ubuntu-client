@@ -557,7 +557,13 @@ dependencies = [
 name = "gotify-tray"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "futures-util",
  "gotify-core",
+ "serde_json",
+ "tokio",
+ "url",
+ "zbus",
 ]
 
 [[package]]
