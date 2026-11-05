@@ -22,7 +22,7 @@ use url::Url;
 use crate::backoff::Backoff;
 use crate::outage::Outage;
 use crate::notify::{NotifierSignal, NotifyBackend, Notifier, Target};
-use crate::tray::{DownEntry, IconKind, MutedEntry, TrayCommand, TrayView};
+use crate::tray::{DownEntry, IconKind, MonitorLine, MutedEntry, TrayCommand, TrayView};
 use gotify_core::kuma::KumaStatus;
 use gotify_core::kuma_status::{KumaSnapshot, KumaState, StatusPage, fetch_snapshot};
 use gotify_core::mutes::{MuteFor, MuteTarget, Mutes};
@@ -149,7 +149,19 @@ pub fn tray_view_at(
         Conn::Connected => IconKind::Ok,
         _ => IconKind::Offline,
     };
-    TrayView { icon, unread: unread > 0, status_line, down, muted }
+    let all = if online {
+        snapshot
+            .map(|s| {
+                s.monitors
+                    .iter()
+                    .map(|m| MonitorLine { name: m.name.clone(), state: m.state, since: m.since, uptime_24h: m.uptime_24h })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    TrayView { icon, unread: unread > 0, status_line, down, muted, all }
 }
 
 /// Monitors whose mute just ended while still down, as messages to show
@@ -740,6 +752,11 @@ impl<B: NotifyBackend> App<B> {
                 }
                 TrayCommand::Mute(target, duration) => self.set_mute(target, Some(duration)),
                 TrayCommand::Unmute(target) => self.set_mute(target, None),
+                TrayCommand::OpenStatusPage => {
+                    if let Some(page) = &self.kuma.page {
+                        self.deps.launcher.open_link(page.display_url().to_string());
+                    }
+                }
                 TrayCommand::Quit => return false,
             },
             Event::Notifier(NotifierSignal::Action(id, key)) => {
@@ -819,6 +836,7 @@ mod tests {
                     state: *st,
                     since: Some(Utc.timestamp_opt(600, 0).unwrap()),
                     message: String::new(),
+                    uptime_24h: None,
                 })
                 .collect(),
         }
@@ -838,6 +856,14 @@ mod tests {
         assert_eq!(v.down[0].message_id, None, "no Gotify message for db");
         assert!(!v.down[0].clearable);
         assert_eq!(v.status_line, "Connected — 1 of 3 monitors down, 1 in maintenance");
+    }
+
+    #[test]
+    fn all_monitors_come_from_the_status_page() {
+        let snap = kuma(&[("web01", KumaState::Up), ("db", KumaState::Down)]);
+        let v = view_with(KumaView::Ok(&snap), &Monitors::new());
+        assert_eq!(v.all.iter().map(|m| (m.name.as_str(), m.state)).collect::<Vec<_>>(), [("web01", KumaState::Up), ("db", KumaState::Down)]);
+        assert!(view_with(KumaView::Off, &Monitors::new()).all.is_empty());
     }
 
     #[test]

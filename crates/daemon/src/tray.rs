@@ -1,6 +1,7 @@
 //! Tray icon (StatusNotifierItem via ksni) and its menu.
 
 use chrono::{DateTime, Local, Utc};
+use gotify_core::kuma_status::{KumaState, uptime_label};
 use gotify_core::mutes::{MuteFor, MuteTarget};
 use gotify_core::text::{since_label, until_label};
 use ksni::menu::{StandardItem, SubMenu};
@@ -29,18 +30,30 @@ pub struct MutedEntry {
     pub until: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One monitor in "All monitors" (from the Kuma status page).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorLine {
+    pub name: String,
+    pub state: KumaState,
+    /// When the current state began (shown for outages).
+    pub since: Option<DateTime<Utc>>,
+    pub uptime_24h: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrayView {
     pub icon: IconKind,
     pub unread: bool,
     pub status_line: String,
     pub down: Vec<DownEntry>,
     pub muted: Vec<MutedEntry>,
+    /// Every monitor on the Kuma status page (empty without one).
+    pub all: Vec<MonitorLine>,
 }
 
 impl Default for TrayView {
     fn default() -> Self {
-        TrayView { icon: IconKind::Offline, unread: false, status_line: "Starting…".into(), down: Vec::new(), muted: Vec::new() }
+        TrayView { icon: IconKind::Offline, unread: false, status_line: "Starting…".into(), down: Vec::new(), muted: Vec::new(), all: Vec::new() }
     }
 }
 
@@ -51,6 +64,7 @@ pub enum TrayCommand {
     ClearMonitor(String),
     Mute(MuteTarget, MuteFor),
     Unmute(MuteTarget),
+    OpenStatusPage,
     MenuOpened,
     Quit,
 }
@@ -62,6 +76,27 @@ pub enum MenuEntry {
     Separator,
     Item(String, TrayCommand),
     Sub(String, Vec<MenuEntry>),
+}
+
+/// "✅ api — up · 99.98 %", "🔴 web — down since 14:32 · 97.2 %".
+fn monitor_line(m: &MonitorLine, now: DateTime<Local>) -> String {
+    let (mark, state) = match m.state {
+        KumaState::Up => ("✅", "up".to_string()),
+        KumaState::Down => (
+            "🔴",
+            match m.since {
+                Some(t) => format!("down since {}", since_label(t.with_timezone(&Local), now)),
+                None => "down".into(),
+            },
+        ),
+        KumaState::Maintenance => ("🔧", "maintenance".into()),
+        KumaState::Pending => ("⏳", "pending".into()),
+        KumaState::Unknown => ("❔", "no checks yet".into()),
+    };
+    match m.uptime_24h {
+        Some(u) => format!("{mark} {} — {state} · {}", m.name, uptime_label(u)),
+        None => format!("{mark} {} — {state}", m.name),
+    }
 }
 
 pub fn menu_model(view: &TrayView, now: DateTime<Local>) -> Vec<MenuEntry> {
@@ -108,6 +143,12 @@ pub fn menu_model(view: &TrayView, now: DateTime<Local>) -> Vec<MenuEntry> {
             items.push(MenuEntry::Item("Unmute".into(), TrayCommand::Unmute(m.target.clone())));
             menu.push(MenuEntry::Sub(label, items));
         }
+        menu.push(MenuEntry::Separator);
+    }
+    if !view.all.is_empty() {
+        let mut items = vec![MenuEntry::Item("Open status page".into(), TrayCommand::OpenStatusPage), MenuEntry::Separator];
+        items.extend(view.all.iter().map(|m| MenuEntry::Item(monitor_line(m, now), TrayCommand::OpenStatusPage)));
+        menu.push(MenuEntry::Sub(format!("All monitors ({})", view.all.len()), items));
         menu.push(MenuEntry::Separator);
     }
     menu.extend([
@@ -186,9 +227,17 @@ impl ksni::Tray for GotifyTray {
 mod tests {
     use super::*;
     use chrono::{Local, TimeZone};
+    use gotify_core::kuma_status::KumaState;
 
     fn view(down: Vec<DownEntry>) -> TrayView {
-        TrayView { icon: IconKind::Ok, unread: false, status_line: "Connected to gotify.example.com".into(), down, muted: vec![] }
+        TrayView {
+            icon: IconKind::Ok,
+            unread: false,
+            status_line: "Connected to gotify.example.com".into(),
+            down,
+            muted: vec![],
+            all: vec![],
+        }
     }
 
     #[test]
@@ -241,6 +290,33 @@ mod tests {
         let MenuEntry::Sub(_, items) = &menu[3] else { panic!("{menu:?}") };
         assert!(!items.iter().any(|i| matches!(i, MenuEntry::Item(l, _) if l == "Show message" || l == "Clear")));
         assert!(items.iter().any(|i| matches!(i, MenuEntry::Item(l, _) if l == "Mute for 1 day")));
+    }
+
+    #[test]
+    fn all_monitors_submenu() {
+        let now = Local.with_ymd_and_hms(2026, 11, 5, 18, 0, 0).unwrap();
+        let since = Local.with_ymd_and_hms(2026, 11, 5, 14, 32, 0).unwrap().to_utc();
+        let mut v = view(vec![]);
+        v.all = vec![
+            MonitorLine { name: "api".into(), state: KumaState::Up, since: None, uptime_24h: Some(0.99987) },
+            MonitorLine { name: "web".into(), state: KumaState::Down, since: Some(since), uptime_24h: Some(0.972) },
+            MonitorLine { name: "backup".into(), state: KumaState::Maintenance, since: None, uptime_24h: None },
+            MonitorLine { name: "new".into(), state: KumaState::Pending, since: None, uptime_24h: None },
+        ];
+        let menu = menu_model(&v, now);
+        let open = || TrayCommand::OpenStatusPage;
+        assert!(menu.contains(&MenuEntry::Sub(
+            "All monitors (4)".into(),
+            vec![
+                MenuEntry::Item("Open status page".into(), open()),
+                MenuEntry::Separator,
+                MenuEntry::Item("✅ api — up · 99.98 %".into(), open()),
+                MenuEntry::Item("🔴 web — down since 14:32 · 97.2 %".into(), open()),
+                MenuEntry::Item("🔧 backup — maintenance".into(), open()),
+                MenuEntry::Item("⏳ new — pending".into(), open()),
+            ]
+        )));
+        assert!(!menu_model(&view(vec![]), now).iter().any(|e| matches!(e, MenuEntry::Sub(l, _) if l.starts_with("All monitors"))));
     }
 
     #[test]

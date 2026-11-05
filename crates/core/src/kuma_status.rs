@@ -58,16 +58,18 @@ pub enum KumaState {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KumaMonitor {
     pub name: String,
     pub state: KumaState,
     /// When the current state began (as far as the last 100 checks show).
     pub since: Option<DateTime<Utc>>,
     pub message: String,
+    /// Share of successful checks in the last 24 hours (0.0–1.0).
+    pub uptime_24h: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct KumaSnapshot {
     pub monitors: Vec<KumaMonitor>,
 }
@@ -119,6 +121,9 @@ struct PageMonitor {
 struct Heartbeats {
     #[serde(rename = "heartbeatList")]
     list: HashMap<String, Vec<Beat>>,
+    /// Keyed "<monitor id>_24".
+    #[serde(rename = "uptimeList", default)]
+    uptime: HashMap<String, f64>,
 }
 
 #[derive(Deserialize)]
@@ -154,8 +159,15 @@ pub fn parse_snapshot(page_json: &str, heartbeat_json: &str) -> Result<KumaSnaps
         .flat_map(|g| &g.monitors)
         .map(|m| {
             let list = beats.list.get(&m.id.to_string()).map(Vec::as_slice).unwrap_or_default();
+            let uptime_24h = beats.uptime.get(&format!("{}_24", m.id)).copied();
             let Some(last) = list.last() else {
-                return KumaMonitor { name: m.name.clone(), state: KumaState::Unknown, since: None, message: String::new() };
+                return KumaMonitor {
+                    name: m.name.clone(),
+                    state: KumaState::Unknown,
+                    since: None,
+                    message: String::new(),
+                    uptime_24h,
+                };
             };
             // Walk back over the checks with the same status as the latest.
             let streak_start = list.iter().rev().take_while(|b| b.status == last.status).last().unwrap_or(last);
@@ -164,10 +176,19 @@ pub fn parse_snapshot(page_json: &str, heartbeat_json: &str) -> Result<KumaSnaps
                 state: state_of(last.status),
                 since: parse_time(&streak_start.time),
                 message: last.msg.clone().unwrap_or_default(),
+                uptime_24h,
             }
         })
         .collect();
     Ok(KumaSnapshot { monitors })
+}
+
+/// "99.98 %": rounded down, so anything short of perfect never shows 100 %.
+pub fn uptime_label(uptime: f64) -> String {
+    let percent = (uptime * 10_000.0).floor() / 100.0;
+    let text = format!("{percent:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{text} %")
 }
 
 /// Fetches the page (monitor names) and the latest checks.
@@ -237,6 +258,22 @@ mod tests {
         let db = &snapshot().monitors[1];
         assert_eq!(db.since, Some(Utc.with_ymd_and_hms(2026, 11, 5, 21, 30, 0).unwrap() + chrono::Duration::milliseconds(123)));
         assert_eq!(db.message, "connect ECONNREFUSED");
+    }
+
+    #[test]
+    fn uptime_of_the_last_24_hours() {
+        let s = snapshot();
+        assert_eq!(s.monitors[0].uptime_24h, Some(1.0));
+        assert_eq!(s.monitors[1].uptime_24h, Some(0.5));
+        assert_eq!(s.monitors[2].uptime_24h, None);
+    }
+
+    #[test]
+    fn uptime_labels_never_round_up_to_100() {
+        assert_eq!(uptime_label(1.0), "100 %");
+        assert_eq!(uptime_label(0.99987), "99.98 %");
+        assert_eq!(uptime_label(0.5), "50 %");
+        assert_eq!(uptime_label(0.972), "97.2 %");
     }
 
     #[test]

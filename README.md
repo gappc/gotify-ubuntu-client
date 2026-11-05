@@ -110,7 +110,12 @@ red, but give no pop-up; add your Gotify notification to them in Kuma
 | blue dot | unread messages |
 
 The menu shows the status line, the monitors that are **down right now** (and
-since when), **Muted** monitors, and *Show messages*, *Settings* and *Quit*.
+since when), **Muted** monitors, **All monitors** (with a status page: every
+monitor with its state and 24-hour uptime, e.g. "✅ api — up · 99.98 %";
+clicking one, or *Open status page*, opens Kuma's page in your browser), and
+*Show messages*, *Settings* and *Quit*. Uptime is rounded down, so it only
+shows 100 % when every check succeeded; monitors that check in only a few
+times a day can show low values after a single failed check.
 Each down monitor offers *Show message* (if Gotify has one) and the mute
 choices.
 
