@@ -18,6 +18,7 @@ OLD_FILES=("$APP_DIR/gotify-tray.desktop") # names used by earlier versions
 
 if [ "${1:-}" = "--uninstall" ]; then
   pkill -f "^$BIN_DIR/gotify-tray\$" 2>/dev/null || true
+  pkill -f "^$BIN_DIR/gotify-tray-window( |\$)" 2>/dev/null || true
   rm -f "${FILES[@]}" "${OLD_FILES[@]}"
   echo "Removed: ${FILES[*]}"
   echo "Kept your settings (~/.config/gotify-tray), state (~/.local/state/gotify-tray) and the token in the GNOME keyring."
@@ -35,6 +36,15 @@ sed "s|^Exec=.*|Exec=$BIN_DIR/gotify-tray|" "data/$APP_ID.desktop" > "$AUTOSTART
 rm -f "${OLD_FILES[@]}"
 command -v update-desktop-database >/dev/null && update-desktop-database "$APP_DIR" 2>/dev/null || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f "$ICON_DIR" 2>/dev/null || true
+# An open message window would keep showing the old version: close it and
+# open it again (the new version) once the tray has been restarted.
+WINDOW="^$BIN_DIR/gotify-tray-window( |\$)"
+REOPEN_WINDOW=false
+if pgrep -f "$WINDOW" >/dev/null; then
+  pkill -f "$WINDOW" || true
+  REOPEN_WINDOW=true
+fi
+
 RUNNING="^$BIN_DIR/gotify-tray\$"
 if pgrep -f "$RUNNING" >/dev/null; then
   # Replace the running (old) version with the new one.
@@ -44,5 +54,9 @@ if pgrep -f "$RUNNING" >/dev/null; then
   echo "Installed and restarted the running gotify-tray."
 else
   echo "Installed. Start it now with: $BIN_DIR/gotify-tray &"
+fi
+if $REOPEN_WINDOW; then
+  setsid -f "$BIN_DIR/gotify-tray-window" >/dev/null 2>&1
+  echo "Reopened the message window with the new version."
 fi
 echo "It also starts automatically when you log in."
