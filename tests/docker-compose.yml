@@ -1,0 +1,12 @@
+# Local Gotify for integration tests. Never point tests at a real server.
+name: gotify-tray-test
+services:
+  gotify:
+    image: gotify/server:3.1.0
+    ports:
+      - "127.0.0.1:18080:80"
+    environment:
+      GOTIFY_DEFAULTUSER_NAME: admin
+      GOTIFY_DEFAULTUSER_PASS: admin
+    tmpfs:
+      - /app/data
