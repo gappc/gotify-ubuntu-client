@@ -35,7 +35,7 @@ pub fn missed_notice(
             Delivery::Silent => None,
         })
         .collect();
-    missed.sort_by(|a, b| b.0.id.cmp(&a.0.id));
+    missed.sort_by_key(|(m, _)| std::cmp::Reverse(m.id));
 
     let notice = match missed.as_slice() {
         [] => MissedNotice::None,

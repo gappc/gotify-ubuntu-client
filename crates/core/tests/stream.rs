@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // tungstenite's handshake callback signature
+
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
