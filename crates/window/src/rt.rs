@@ -35,6 +35,7 @@ pub fn notify_daemon(call: DaemonCall) {
             let proxy = gotify_core::ipc::GotifyTrayProxy::new(&conn).await?;
             match call {
                 DaemonCall::ReloadConfig => proxy.reload_config().await,
+                DaemonCall::Resync => proxy.resync().await,
                 DaemonCall::MarkRead(id) => proxy.mark_read(id).await,
             }
         };
@@ -47,6 +48,8 @@ pub fn notify_daemon(call: DaemonCall) {
 #[derive(Debug, Clone, Copy)]
 pub enum DaemonCall {
     ReloadConfig,
+    /// Messages were deleted: re-check the "down right now" state.
+    Resync,
     MarkRead(i64),
 }
 

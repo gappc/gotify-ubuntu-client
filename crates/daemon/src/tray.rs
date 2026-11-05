@@ -81,12 +81,18 @@ impl GotifyTray {
     }
 }
 
+/// Menu labels are shown with "_x" as a keyboard mnemonic, so a literal
+/// underscore must be doubled.
+pub fn menu_label(text: &str) -> String {
+    text.replace('_', "__")
+}
+
 fn to_ksni(entry: MenuEntry) -> ksni::MenuItem<GotifyTray> {
     match entry {
         MenuEntry::Separator => ksni::MenuItem::Separator,
-        MenuEntry::Label(label) => StandardItem { label, enabled: false, ..Default::default() }.into(),
+        MenuEntry::Label(label) => StandardItem { label: menu_label(&label), enabled: false, ..Default::default() }.into(),
         MenuEntry::Item(label, cmd) => StandardItem {
-            label,
+            label: menu_label(&label),
             activate: Box::new(move |t: &mut GotifyTray| {
                 let _ = t.tx.send(cmd.clone());
             }),
@@ -94,7 +100,8 @@ fn to_ksni(entry: MenuEntry) -> ksni::MenuItem<GotifyTray> {
         }
         .into(),
         MenuEntry::Sub(label, items) => {
-            SubMenu { label, submenu: items.into_iter().map(to_ksni).collect(), ..Default::default() }.into()
+            SubMenu { label: menu_label(&label), submenu: items.into_iter().map(to_ksni).collect(), ..Default::default() }
+                .into()
         }
     }
 }
@@ -134,6 +141,13 @@ mod tests {
 
     fn view(down: Vec<DownEntry>) -> TrayView {
         TrayView { icon: IconKind::Ok, unread: false, status_line: "Connected to gotify.example.com".into(), down }
+    }
+
+    #[test]
+    fn underscores_survive_the_menu() {
+        // AppIndicator treats "_x" as a keyboard mnemonic and drops the "_".
+        assert_eq!(menu_label("db_primary — down since 14:32"), "db__primary — down since 14:32");
+        assert_eq!(menu_label("plain"), "plain");
     }
 
     #[test]

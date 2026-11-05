@@ -605,6 +605,7 @@ fn delete_one(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>, id: i64) {
     let (ui, model) = (ui.clone(), model.clone());
     spawn_ui(async move { client.delete_message(id).await }, move |result| match result {
         Ok(()) => {
+            notify_daemon(DaemonCall::Resync);
             if let Some(history) = model.borrow_mut().history.as_mut() {
                 history.retain(|m| m.id != id);
             }
@@ -653,6 +654,7 @@ fn confirm_delete_all(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
         };
         spawn_ui(work, move |result| match result {
             Ok(()) => {
+                notify_daemon(DaemonCall::Resync);
                 model.borrow_mut().history = None;
                 load_list(&ui, &model);
             }

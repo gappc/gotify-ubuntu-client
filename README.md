@@ -26,7 +26,8 @@ turns red while an Uptime Kuma monitor is down.
 
 This installs both programs to `~/.local/bin`, adds "Gotify" to the app menu
 and starts it automatically when you log in. Start it right away with
-`~/.local/bin/gotify-tray &`.
+`~/.local/bin/gotify-tray &`. Running `./install.sh` again after an update
+restarts the running copy with the new version.
 
 ## Log in
 
