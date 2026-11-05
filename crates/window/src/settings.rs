@@ -27,6 +27,35 @@ pub fn normalize_server_url(input: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+pub fn normalize_token(input: &str) -> Result<String, String> {
+    let token = input.trim();
+    if token.is_empty() {
+        return Err("Paste the client token from Gotify's web UI (Clients).".into());
+    }
+    Ok(token.to_string())
+}
+
+pub fn explain_token_error(e: &ApiError, url: &Url) -> String {
+    match e {
+        ApiError::Unauthorized => {
+            "Gotify doesn't accept this token. Use a client token (web UI → Clients), not an app token.".into()
+        }
+        other => explain(other, url),
+    }
+}
+
+/// What to tell the user after logging out (`revoked`: the client was deleted).
+pub fn logout_note(config: &Config, revoked: bool) -> Option<String> {
+    if revoked {
+        return None;
+    }
+    Some(match &config.client_name {
+        Some(name) => format!("Logged out. Remove the client “{name}” in Gotify's web UI (Clients) to revoke it fully."),
+        None => "Logged out. Delete the client you created for this app in Gotify's web UI (Clients) to revoke its token."
+            .into(),
+    })
+}
+
 pub fn client_name(hostname: &str) -> String {
     format!("Ubuntu tray ({hostname})")
 }
@@ -82,20 +111,24 @@ fn show(label: &gtk::Label, text: &str, error: bool) {
 }
 
 fn logged_out_group(dialog: &adw::PreferencesDialog, on_changed: OnChanged, note: Option<String>) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder()
-        .title("Gotify server")
-        .description("Log in once; the app creates its own client in Gotify and stores its token in the GNOME keyring. Your password is not saved.")
-        .build();
+    const TOKEN_HELP: &str = "In Gotify's web UI, open Clients, create a client (e.g. “ubuntu-tray”) and paste its token here. The token is stored in the GNOME keyring.";
+    const PASSWORD_HELP: &str = "The app creates its own client in Gotify and stores its token in the GNOME keyring. Your password is not saved.";
+    let group = adw::PreferencesGroup::builder().title("Gotify server").description(TOKEN_HELP).build();
     let url_row = adw::EntryRow::builder().title("Server address").build();
-    let user_row = adw::EntryRow::builder().title("Username").build();
-    let pass_row = adw::PasswordEntryRow::builder().title("Password").build();
-    group.add(&url_row);
-    group.add(&user_row);
-    group.add(&pass_row);
+    let token_row = adw::PasswordEntryRow::builder().title("Client token").build();
+    let user_row = adw::EntryRow::builder().title("Username").visible(false).build();
+    let pass_row = adw::PasswordEntryRow::builder().title("Password").visible(false).build();
+    for row in [url_row.upcast_ref::<gtk::Widget>(), token_row.upcast_ref(), user_row.upcast_ref(), pass_row.upcast_ref()] {
+        group.add(row);
+    }
 
+    let switch_mode = gtk::Button::builder().label("Log in with password instead").css_classes(["flat"]).build();
     let test = gtk::Button::with_label("Test connection");
     let login = gtk::Button::builder().label("Log in").css_classes(["suggested-action"]).build();
-    let buttons = gtk::Box::builder().spacing(12).margin_top(12).halign(gtk::Align::End).build();
+    let buttons = gtk::Box::builder().spacing(12).margin_top(12).build();
+    switch_mode.set_hexpand(true);
+    switch_mode.set_halign(gtk::Align::Start);
+    buttons.append(&switch_mode);
     buttons.append(&test);
     buttons.append(&login);
     let status = status_label();
@@ -105,6 +138,20 @@ fn logged_out_group(dialog: &adw::PreferencesDialog, on_changed: OnChanged, note
     group.add(&footer);
     if let Some(note) = note {
         show(&status, &note, false);
+    }
+
+    {
+        let (group, token_row, user_row, pass_row, status) =
+            (group.clone(), token_row.clone(), user_row.clone(), pass_row.clone(), status.clone());
+        switch_mode.connect_clicked(move |button| {
+            let to_password = token_row.is_visible();
+            token_row.set_visible(!to_password);
+            user_row.set_visible(to_password);
+            pass_row.set_visible(to_password);
+            group.set_description(Some(if to_password { PASSWORD_HELP } else { TOKEN_HELP }));
+            button.set_label(if to_password { "Use a client token instead" } else { "Log in with password instead" });
+            show(&status, "", false);
+        });
     }
 
     {
@@ -121,9 +168,6 @@ fn logged_out_group(dialog: &adw::PreferencesDialog, on_changed: OnChanged, note
             spawn_ui(async move { server_info(&u).await }, move |result| {
                 button.set_sensitive(true);
                 match result {
-                    Ok(info) if !info.local_auth => {
-                        show(&status, "This server only allows OIDC login, which isn't supported yet.", true)
-                    }
                     Ok(info) => show(&status, &format!("Gotify {} — ready to log in", info.version), false),
                     Err(e) => show(&status, &explain(&e, &url), true),
                 }
@@ -137,36 +181,70 @@ fn logged_out_group(dialog: &adw::PreferencesDialog, on_changed: OnChanged, note
             Ok(u) => u,
             Err(e) => return show(&status, &e, true),
         };
-        let (user, pass) = (user_row.text().to_string(), pass_row.text().to_string());
-        if user.is_empty() || pass.is_empty() {
-            return show(&status, "Enter your Gotify username and password.", true);
-        }
-        button.set_sensitive(false);
-        show(&status, "Logging in…", false);
-        let name = client_name(&gtk::glib::host_name());
-        let u = url.clone();
-        let work = async move {
-            let new = create_client(&u, &user, &pass, &name).await?;
-            let me = GotifyClient::new(u.clone(), new.token.clone()).current_user().await?;
-            store_token(&u, &new.token).await.map_err(|e| ApiError::Decode(e.to_string()))?;
-            let config = Config { server_url: u, client_id: new.id, client_name: new.name, user_name: me.name };
-            save_config(&Paths::from_env(), &config).map_err(|e| ApiError::Decode(e.to_string()))?;
-            Ok::<_, ApiError>(())
+        let with_token = token_row.is_visible();
+        let finish = |button: &gtk::Button, status: &gtk::Label| {
+            button.set_sensitive(false);
+            show(status, "Logging in…", false);
         };
-        let (button, status, dialog, on_changed) = (button.clone(), status.clone(), dialog.clone(), on_changed.clone());
-        spawn_ui(work, move |result| match result {
+        let (button2, status2, dialog2, on_changed2, url2) =
+            (button.clone(), status.clone(), dialog.clone(), on_changed.clone(), url.clone());
+        let done = move |result: Result<(), String>| match result {
             Ok(()) => {
                 notify_daemon(DaemonCall::ReloadConfig);
-                on_changed();
-                fill(&dialog, on_changed, None);
+                on_changed2();
+                fill(&dialog2, on_changed2, None);
             }
-            Err(e) => {
-                button.set_sensitive(true);
-                show(&status, &explain(&e, &url), true);
+            Err(text) => {
+                button2.set_sensitive(true);
+                show(&status2, &text, true);
             }
-        });
+        };
+        if with_token {
+            let token = match normalize_token(&token_row.text()) {
+                Ok(t) => t,
+                Err(e) => return show(&status, &e, true),
+            };
+            finish(button, &status);
+            let work = async move {
+                let me = GotifyClient::new(url2.clone(), token.clone())
+                    .current_user()
+                    .await
+                    .map_err(|e| explain_token_error(&e, &url2))?;
+                save_login(&url2, &token, None, None, me.name).await
+            };
+            spawn_ui(work, done);
+        } else {
+            let (user, pass) = (user_row.text().to_string(), pass_row.text().to_string());
+            if user.is_empty() || pass.is_empty() {
+                return show(&status, "Enter your Gotify username and password.", true);
+            }
+            finish(button, &status);
+            let name = client_name(&gtk::glib::host_name());
+            let work = async move {
+                let new = create_client(&url2, &user, &pass, &name).await.map_err(|e| explain(&e, &url2))?;
+                let me = GotifyClient::new(url2.clone(), new.token.clone())
+                    .current_user()
+                    .await
+                    .map_err(|e| explain(&e, &url2))?;
+                save_login(&url2, &new.token, Some(new.id), Some(new.name), me.name).await
+            };
+            spawn_ui(work, done);
+        }
     });
     group
+}
+
+/// Token into the keyring, everything else into config.toml.
+async fn save_login(
+    url: &Url,
+    token: &str,
+    client_id: Option<i64>,
+    client_name: Option<String>,
+    user_name: String,
+) -> Result<(), String> {
+    store_token(url, token).await.map_err(|e| format!("Couldn't save the token: {e}"))?;
+    let config = Config { server_url: url.clone(), client_id, client_name, user_name };
+    save_config(&Paths::from_env(), &config).map_err(|e| format!("Couldn't save the settings: {e}"))
 }
 
 fn logged_in_group(dialog: &adw::PreferencesDialog, config: Config, on_changed: OnChanged) -> adw::PreferencesGroup {
@@ -186,19 +264,13 @@ fn logged_in_group(dialog: &adw::PreferencesDialog, config: Config, on_changed: 
         let config = config.clone();
         let work = async move {
             let token = gotify_core::secret::load_token(&config.server_url).await.ok().flatten();
-            let revoked = match token {
-                Some(t) => GotifyClient::new(config.server_url.clone(), t).delete_client(config.client_id).await,
-                None => Err(ApiError::Forbidden),
+            let revoked = match (token, config.client_id) {
+                (Some(t), Some(id)) => GotifyClient::new(config.server_url.clone(), t).delete_client(id).await.is_ok(),
+                _ => false,
             };
             let _ = delete_token(&config.server_url).await;
             let _ = remove_config(&Paths::from_env());
-            match revoked {
-                Ok(()) => None,
-                Err(_) => Some(format!(
-                    "Logged out. Remove the client “{}” in Gotify's web UI (Clients) to revoke it fully.",
-                    config.client_name
-                )),
-            }
+            logout_note(&config, revoked)
         };
         let (dialog, on_changed) = (dialog.clone(), on_changed.clone());
         spawn_ui(work, move |note| {
@@ -221,6 +293,42 @@ mod tests {
         assert_eq!(normalize_server_url("http://10.0.0.2:8080").unwrap().as_str(), "http://10.0.0.2:8080/");
         assert!(normalize_server_url("ftp://x").is_err());
         assert!(normalize_server_url("   ").is_err());
+    }
+
+    #[test]
+    fn token_is_trimmed() {
+        assert_eq!(normalize_token("  gtfyc.abc\n").unwrap(), "gtfyc.abc");
+        assert!(normalize_token("   ").is_err());
+    }
+
+    #[test]
+    fn rejected_token_is_explained() {
+        let url: Url = "https://g.example/".parse().unwrap();
+        assert_eq!(
+            explain_token_error(&ApiError::Unauthorized, &url),
+            "Gotify doesn't accept this token. Use a client token (web UI → Clients), not an app token."
+        );
+    }
+
+    #[test]
+    fn logout_note_depends_on_how_we_logged_in() {
+        let mut c = Config {
+            server_url: "https://g.example/".parse().unwrap(),
+            client_id: Some(3),
+            client_name: Some("Ubuntu tray (laptop)".into()),
+            user_name: "chris".into(),
+        };
+        assert_eq!(logout_note(&c, true), None);
+        assert_eq!(
+            logout_note(&c, false).unwrap(),
+            "Logged out. Remove the client “Ubuntu tray (laptop)” in Gotify's web UI (Clients) to revoke it fully."
+        );
+        c.client_id = None;
+        c.client_name = None;
+        assert_eq!(
+            logout_note(&c, false).unwrap(),
+            "Logged out. Delete the client you created for this app in Gotify's web UI (Clients) to revoke its token."
+        );
     }
 
     #[test]

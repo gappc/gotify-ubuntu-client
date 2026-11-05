@@ -15,7 +15,7 @@ turns red while an Uptime Kuma monitor is down.
   default on Ubuntu) for the tray icon
 - GNOME keyring (stores the login token)
 - To build: Rust 1.99+, `libgtk-4-dev`, `libadwaita-1-dev`
-- Gotify server 3.x with username/password login (OIDC isn't supported yet)
+- Gotify server 3.x
 
 ## Install
 
@@ -30,14 +30,23 @@ and starts it automatically when you log in. Start it right away with
 
 ## Log in
 
-Tray icon → **Settings**. Enter the server address, username and password,
-then **Log in**. Like the Android app, this creates a client named
-`Ubuntu tray (<hostname>)` in Gotify. The token goes into the GNOME keyring;
-the password is not stored.
+Tray icon → **Settings**.
 
-**Log out** removes the token from this computer. Gotify 3 doesn't let the
-app delete its own client without a fresh password login, so remove the
-client under *Clients* in Gotify's web UI to revoke it fully.
+**With a client token (default, recommended):** in Gotify's web UI open
+*Clients*, create a client (e.g. `ubuntu-tray`), copy its token, and paste it
+together with the server address. The app never sees your password. Use a
+*client* token, not an app token (app tokens can only send messages). This
+also works on servers that only allow OIDC login.
+
+**With your password:** choose "Log in with password instead". Like the
+Android app, this creates a client named `Ubuntu tray (<hostname>)` in Gotify;
+the password itself is not stored.
+
+Either way the token goes into the GNOME keyring, never into a file.
+
+**Log out** removes the token from this computer. To revoke it fully, delete
+the client under *Clients* in Gotify's web UI (Gotify 3 doesn't let the app
+delete it without a fresh password login).
 
 ## Notifications
 

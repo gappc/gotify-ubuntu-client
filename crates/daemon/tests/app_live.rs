@@ -78,7 +78,7 @@ async fn start(base: &url::Url, last_notified: i64, sync_delay: Duration) -> Run
     let (new, admin, _) = setup(base).await;
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path());
-    save_config(&paths, &Config { server_url: base.clone(), client_id: new.id, client_name: new.name.clone(), user_name: "admin".into() })
+    save_config(&paths, &Config { server_url: base.clone(), client_id: Some(new.id), client_name: Some(new.name.clone()), user_name: "admin".into() })
         .unwrap();
     save_state(&paths, &State { last_read_id: Some(last_notified), last_notified_id: Some(last_notified), ..State::default() })
         .unwrap();

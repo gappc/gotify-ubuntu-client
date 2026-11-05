@@ -11,8 +11,12 @@ use crate::monitors::Monitors;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub server_url: Url,
-    pub client_id: i64,
-    pub client_name: String,
+    /// Set when the app created its own client (password login); None when
+    /// the user pasted a client token they created themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
     pub user_name: String,
 }
 
@@ -139,8 +143,8 @@ mod tests {
     fn config() -> Config {
         Config {
             server_url: "https://gotify.example.com/".parse().unwrap(),
-            client_id: 11,
-            client_name: "Ubuntu tray (laptop)".into(),
+            client_id: Some(11),
+            client_name: Some("Ubuntu tray (laptop)".into()),
             user_name: "chris".into(),
         }
     }
@@ -165,6 +169,16 @@ mod tests {
         assert!(!s.bind_to_server(&a));
         assert!(s.bind_to_server(&b));
         assert_eq!(s, State { server: Some(b.to_string()), ..State::default() });
+    }
+
+    #[test]
+    fn token_login_config_has_no_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Paths::in_dir(dir.path());
+        std::fs::create_dir_all(p.config_file.parent().unwrap()).unwrap();
+        std::fs::write(&p.config_file, "server_url = \"https://g.example/\"\nuser_name = \"chris\"\n").unwrap();
+        let c = load_config(&p).unwrap().unwrap();
+        assert_eq!((c.client_id, c.client_name), (None, None));
     }
 
     #[test]

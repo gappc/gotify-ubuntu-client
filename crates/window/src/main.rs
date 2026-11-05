@@ -42,14 +42,17 @@ fn handle(app: &adw::Application, args: Args) {
     if args.settings {
         let reload_target = window.clone();
         let parent = window.as_ref().map(|w| w.window.clone().upcast::<gtk::Widget>());
-        let hold = app.hold();
+        // Keep the app alive while the dialog is open, and release it on close
+        // explicitly: the dialog itself is never finalized (its buttons hold
+        // references back to it), so dropping the guard with it would never happen.
+        let hold = std::cell::RefCell::new(Some(app.hold()));
         let dialog = settings::open_settings(parent.as_ref(), move || {
             if let Some(w) = &reload_target {
                 w.reload();
             }
         });
         dialog.connect_closed(move |_| {
-            let _ = &hold;
+            hold.borrow_mut().take();
         });
         return;
     }
