@@ -83,7 +83,7 @@ delete it without a fresh password login).
 
 Without it, the tray only knows what Kuma *sends*: if Kuma itself stops, the
 icon would stay green. With a status page, the tray asks Kuma directly every
-5 minutes (and when you open the menu, at most once a minute), so green means
+15 minutes (and when you open the menu, at most once a minute), so green means
 "every monitor is up" and the menu shows e.g. "Connected — 14 monitors up".
 The status page then decides what's down, and also covers monitors that don't
 send notifications to Gotify. A Kuma message arriving through Gotify still
@@ -97,8 +97,13 @@ confirm.
 2. In the app: **Settings → Uptime Kuma** → paste the page's address
    (`http://kuma:3001/status/your-slug`) → **Check and save**.
 
-Each request is about 60 KB (Kuma sends the last 100 checks per monitor), so
-roughly 17 MB per day. Monitors that don't send to Gotify still turn the tray
+**Data use:** about 6–7 MB per day in total (fine on a mobile hotspot). Each
+status page check is about 60 KB (Kuma always sends the last 100 checks per
+monitor) and happens every 15 minutes; with a status page the tray also skips
+its periodic re-read of the Gotify history. Nothing is loaded while the
+computer is suspended.
+
+Monitors that don’t send to Gotify still turn the tray
 red, but give no pop-up; add your Gotify notification to them in Kuma
 (*Edit monitor → Notifications*) if you want pop-ups and phone alerts too.
 
@@ -126,7 +131,8 @@ Without a status page, outages are worked out from the Gotify messages, and
 each entry also has **Clear** for a monitor that will never report "Up" again
 (deleted or renamed in Kuma). Deleting a monitor's Down message also clears it.
 The app then re-checks with Gotify when the menu opens, when the message window
-closes, after deleting in the window, and every 15 minutes.
+closes, after deleting in the window, and every 15 minutes (the 15-minute
+re-check is skipped when a status page is set up).
 
 ## Notifications
 

@@ -13,5 +13,6 @@ pub const MENU_RESYNC_DEBOUNCE: Duration = Duration::from_secs(10);
 pub const KEYRING_RETRY: Duration = Duration::from_secs(30);
 /// Not connected for this long raises the "Can't reach Gotify" alert.
 pub const OUTAGE_ALERT_AFTER: Duration = Duration::from_secs(5 * 60);
-/// How often the tray asks the Uptime Kuma status page (Kuma caches it for a minute).
-pub const KUMA_POLL_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How often the tray asks the Uptime Kuma status page. Each answer is ~60 KB;
+/// changes arrive instantly via Gotify anyway, so this is only the safety net.
+pub const KUMA_POLL_EVERY: Duration = Duration::from_secs(15 * 60);

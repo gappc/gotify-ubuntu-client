@@ -183,6 +183,12 @@ pub fn tray_view_at(
     TrayView { icon, unread: unread > 0, status_line, down, muted, all }
 }
 
+/// The 15-minute re-read of the Gotify history is only needed when outages are
+/// worked out from messages; with a status page, Kuma decides (saves data).
+pub fn periodic_gotify_resync(status_page_configured: bool) -> bool {
+    !status_page_configured
+}
+
 /// Monitors whose mute just ended while still down, as messages to show
 /// again (so a real outage can't hide behind a forgotten mute).
 pub fn still_down_after_mute(ended: &[MuteTarget], monitors: &Monitors) -> Vec<Message> {
@@ -754,7 +760,9 @@ impl<B: NotifyBackend> App<B> {
             }
             Event::Tick => {
                 self.schedule_mute_check();
-                self.resync_now();
+                if periodic_gotify_resync(self.kuma.page.is_some()) {
+                    self.resync_now();
+                }
             }
             Event::MuteCheck(seq) if seq == self.mute_seq => self.on_mute_check().await,
             Event::MuteCheck(_) => {}
@@ -917,6 +925,14 @@ mod tests {
         snap.fetched_at = Some(Utc.timestamp_opt(1000, 0).unwrap());
         let v = view_with(KumaView::Ok(&snap), &monitors);
         assert_eq!(v.icon, IconKind::Ok);
+    }
+
+    #[test]
+    fn periodic_gotify_recheck_only_without_status_page() {
+        // With a status page, Kuma decides what's down; re-reading the whole
+        // Gotify history every 15 minutes would only cost data.
+        assert!(periodic_gotify_resync(false));
+        assert!(!periodic_gotify_resync(true));
     }
 
     #[test]
