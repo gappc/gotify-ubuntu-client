@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::backoff::Backoff;
+use crate::outage::Outage;
 use crate::notify::{NotifierSignal, NotifyBackend, Notifier, Target};
 use crate::tray::{DownEntry, IconKind, TrayCommand, TrayView};
 
@@ -85,6 +86,8 @@ pub enum Event {
     Wake,
     /// Periodic re-sync.
     Tick,
+    /// The outage alert delay for this outage has passed.
+    OutageCheck(u64),
 }
 
 /// Starts the window process or a browser.
@@ -106,6 +109,8 @@ pub struct AppDeps<B: NotifyBackend> {
     pub last_read: Arc<AtomicI64>,
     /// Test hook: wait this long before fetching during a sync.
     pub sync_delay: Duration,
+    /// How long the connection may be down before "Can't reach Gotify".
+    pub outage_alert_after: Duration,
 }
 
 pub struct App<B: NotifyBackend> {
@@ -127,6 +132,7 @@ pub struct App<B: NotifyBackend> {
     pending: Vec<Message>,
     last_sync: Option<Instant>,
     login_expired_notified: bool,
+    outage: Outage,
 }
 
 fn args_for_message(id: Option<i64>) -> Vec<String> {
@@ -156,6 +162,7 @@ impl<B: NotifyBackend> App<B> {
             pending: Vec::new(),
             last_sync: None,
             login_expired_notified: false,
+            outage: Outage::default(),
         };
         (app, tx, view_rx)
     }
@@ -209,6 +216,10 @@ impl<B: NotifyBackend> App<B> {
 
     /// (Re)start from config and keyring.
     async fn start(&mut self) {
+        // Logged out, new login or keyring retry: not a server outage.
+        if self.outage.cancel() {
+            self.deps.notifier.close_outage().await;
+        }
         self.stop_connection();
         self.client = None;
         self.config = match load_config(&self.deps.paths) {
@@ -298,7 +309,10 @@ impl<B: NotifyBackend> App<B> {
         }
     }
 
-    fn reconnect_later(&mut self) {
+    fn reconnect_later(&mut self, reason: &str) {
+        if let Some(seq) = self.outage.disconnected(reason) {
+            self.schedule(self.deps.outage_alert_after, Event::OutageCheck(seq));
+        }
         self.stop_connection();
         self.conn = Conn::Reconnecting;
         let delay = self.backoff.next_delay();
@@ -306,6 +320,9 @@ impl<B: NotifyBackend> App<B> {
     }
 
     async fn login_expired(&mut self) {
+        if self.outage.cancel() {
+            self.deps.notifier.close_outage().await;
+        }
         self.stop_connection();
         self.conn = Conn::LoginExpired;
         if !self.login_expired_notified {
@@ -319,6 +336,9 @@ impl<B: NotifyBackend> App<B> {
         self.last_sync = Some(Instant::now());
         self.backoff.reset();
         self.conn = Conn::Connected;
+        if self.outage.connected() {
+            self.deps.notifier.show_reconnected().await;
+        }
         self.apps = result.apps.into_iter().map(|a| (a.id, a.name)).collect();
         self.message_ids = result.messages.iter().map(|m| m.id).collect();
         self.state.monitors = resync(&self.state.monitors, &result.messages);
@@ -405,7 +425,12 @@ impl<B: NotifyBackend> App<B> {
                     if !matches!(end, StreamEnd::Closed) {
                         eprintln!("gotify-tray: stream ended: {end:?}");
                     }
-                    self.reconnect_later();
+                    let reason = match &end {
+                        StreamEnd::Silent => "The server stopped responding.".to_string(),
+                        StreamEnd::Error(e) => format!("Last error: {e}"),
+                        _ => "The server closed the connection.".to_string(),
+                    };
+                    self.reconnect_later(&reason);
                 }
             },
             Event::Synced(g, result) if g == current => match result {
@@ -415,7 +440,7 @@ impl<B: NotifyBackend> App<B> {
                     eprintln!("gotify-tray: sync failed: {e}");
                     self.syncing = false;
                     if self.conn != Conn::Connected {
-                        self.reconnect_later();
+                        self.reconnect_later(&format!("Last error: {e}"));
                     }
                 }
             },
@@ -427,7 +452,18 @@ impl<B: NotifyBackend> App<B> {
             | Event::Synced(..)
             | Event::Reconnect(_)
             | Event::KeyringRetry(_) => {}
+            Event::OutageCheck(seq) => {
+                if matches!(self.conn, Conn::Connecting | Conn::Reconnecting)
+                    && let Some(reason) = self.outage.alert_due(seq)
+                {
+                    self.deps.notifier.show_outage(&reason).await;
+                }
+            }
             Event::Wake => {
+                // Time asleep doesn't count towards the outage alert.
+                if let Some(seq) = self.outage.restart_clock() {
+                    self.schedule(self.deps.outage_alert_after, Event::OutageCheck(seq));
+                }
                 if matches!(self.conn, Conn::Connected | Conn::Connecting | Conn::Reconnecting) {
                     self.backoff.reset();
                     self.connect();

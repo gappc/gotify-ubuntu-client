@@ -51,6 +51,7 @@ async fn run() -> zbus::Result<()> {
         launcher: Box::new(ProcessLauncher),
         last_read: last_read.clone(),
         sync_delay: Duration::ZERO,
+        outage_alert_after: gotify_core::consts::OUTAGE_ALERT_AFTER,
     };
     let (app, tx, mut view) = App::new(deps);
 

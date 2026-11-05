@@ -11,3 +11,5 @@ pub const STREAM_SILENCE_TIMEOUT: Duration = Duration::from_secs(100);
 pub const RESYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 pub const MENU_RESYNC_DEBOUNCE: Duration = Duration::from_secs(10);
 pub const KEYRING_RETRY: Duration = Duration::from_secs(30);
+/// Not connected for this long raises the "Can't reach Gotify" alert.
+pub const OUTAGE_ALERT_AFTER: Duration = Duration::from_secs(5 * 60);

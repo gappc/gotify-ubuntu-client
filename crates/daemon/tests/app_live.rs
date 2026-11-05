@@ -75,10 +75,21 @@ async fn setup(base: &url::Url) -> (gotify_core::model::NewClient, GotifyClient,
 }
 
 async fn start(base: &url::Url, last_notified: i64, sync_delay: Duration) -> Running {
+    start_via(base, base, last_notified, sync_delay, Duration::from_secs(300)).await
+}
+
+/// Like `start`, but the app talks to `app_url` (e.g. a proxy in front of `base`).
+async fn start_via(
+    base: &url::Url,
+    app_url: &url::Url,
+    last_notified: i64,
+    sync_delay: Duration,
+    outage_alert_after: Duration,
+) -> Running {
     let (new, admin, _) = setup(base).await;
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path());
-    save_config(&paths, &Config { server_url: base.clone(), client_id: Some(new.id), client_name: Some(new.name.clone()), user_name: "admin".into() })
+    save_config(&paths, &Config { server_url: app_url.clone(), client_id: Some(new.id), client_name: Some(new.name.clone()), user_name: "admin".into() })
         .unwrap();
     save_state(&paths, &State { last_read_id: Some(last_notified), last_notified_id: Some(last_notified), ..State::default() })
         .unwrap();
@@ -94,6 +105,7 @@ async fn start(base: &url::Url, last_notified: i64, sync_delay: Duration) -> Run
         launcher: Box::new(NoLauncher),
         last_read: Arc::new(AtomicI64::new(0)),
         sync_delay,
+        outage_alert_after,
     };
     let (app, tx, view) = App::new(deps);
     tokio::spawn(app.run());
@@ -168,4 +180,49 @@ async fn deleting_down_message_clears_on_resync() {
     r.admin.delete_message(id).await.unwrap();
     r.tx.send(Event::Service(ServiceCall::Resync)).unwrap();
     wait_for(&mut r.view, |v| !v.down.iter().any(|d| d.monitor == "delete-mon")).await;
+}
+
+/// A TCP proxy to the test server that the test can cut and restore.
+struct Proxy {
+    port: u16,
+    task: tokio::task::JoinHandle<()>,
+}
+
+async fn proxy(port: u16) -> Proxy {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let mut conns = tokio::task::JoinSet::new(); // dropped (and aborted) with this task
+        loop {
+            let (mut inbound, _) = listener.accept().await.unwrap();
+            conns.spawn(async move {
+                let mut outbound = tokio::net::TcpStream::connect("127.0.0.1:18080").await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            });
+        }
+    });
+    Proxy { port, task }
+}
+
+#[tokio::test]
+async fn outage_alert_and_all_clear() {
+    let Some(base) = base() else { return };
+    let _guard = SERIAL.lock().await;
+    let (_, _, newest) = setup(&base).await;
+    let p = proxy(0).await;
+    let via: url::Url = format!("http://127.0.0.1:{}/", p.port).parse().unwrap();
+    let mut r = start_via(&base, &via, newest, Duration::ZERO, Duration::from_secs(1)).await;
+    wait_for(&mut r.view, |v| v.status_line.starts_with("Connected")).await;
+
+    p.task.abort(); // cut the line: open connections close, new ones are refused
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !r.sent.summaries().contains(&"Can't reach Gotify".to_string()) {
+        assert!(tokio::time::Instant::now() < deadline, "no outage alert: {:?}", r.sent.summaries());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let _p = proxy(p.port).await; // restore it
+    r.tx.send(Event::Wake).unwrap(); // skip the backoff wait
+    wait_for(&mut r.view, |v| v.status_line.starts_with("Connected")).await;
+    assert_eq!(r.sent.summaries(), ["Can't reach Gotify", "Connected to Gotify again"]);
 }

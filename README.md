@@ -69,6 +69,12 @@ is disconnected (suspend, network loss, app not running) come as one summary,
 e.g. "5 missed messages". On the very first start, old messages are not
 notified.
 
+If the app can't reach Gotify for **5 minutes**, it shows "Can't reach
+Gotify" with the last error; it stays on screen, since no messages arrive
+meanwhile. When the connection is back it's replaced by "Connected to Gotify
+again", followed by the usual missed-messages summary. Time while the computer
+is suspended doesn't count.
+
 ## Tray icon
 
 - light: connected, nothing down

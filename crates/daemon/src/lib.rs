@@ -5,6 +5,7 @@ pub mod backoff;
 pub mod icon;
 pub mod launcher;
 pub mod notify;
+pub mod outage;
 pub mod service;
 pub mod signals;
 pub mod tray;

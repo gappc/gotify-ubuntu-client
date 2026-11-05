@@ -64,6 +64,27 @@ pub fn request_for_summary(count: usize, urgency: Urgency, lines: &[String]) -> 
     }
 }
 
+pub fn request_for_outage(reason: &str) -> NotifyRequest {
+    let minutes = gotify_core::consts::OUTAGE_ALERT_AFTER.as_secs() / 60;
+    NotifyRequest {
+        summary: "Can't reach Gotify".into(),
+        body: escape_markup(&format!("No messages for {minutes} minutes. {reason}")),
+        urgency: Urgency::Critical,
+        actions: vec![default_action()],
+        replaces_id: 0,
+    }
+}
+
+pub fn request_for_reconnected(replaces_id: u32) -> NotifyRequest {
+    NotifyRequest {
+        summary: "Connected to Gotify again".into(),
+        body: String::new(),
+        urgency: Urgency::Normal,
+        actions: vec![default_action()],
+        replaces_id,
+    }
+}
+
 pub fn request_for_login_expired() -> NotifyRequest {
     NotifyRequest {
         summary: "Gotify login expired".into(),
@@ -91,11 +112,13 @@ pub struct Notifier<B: NotifyBackend> {
     backend: B,
     shown: HashMap<u32, Shown>,
     down_by_monitor: HashMap<String, u32>,
+    /// The "Can't reach Gotify" notification, while it's shown.
+    outage_id: Option<u32>,
 }
 
 impl<B: NotifyBackend> Notifier<B> {
     pub fn new(backend: B) -> Self {
-        Notifier { backend, shown: HashMap::new(), down_by_monitor: HashMap::new() }
+        Notifier { backend, shown: HashMap::new(), down_by_monitor: HashMap::new(), outage_id: None }
     }
 
     #[cfg(test)]
@@ -147,7 +170,36 @@ impl<B: NotifyBackend> Notifier<B> {
         }
     }
 
+    pub async fn show_outage(&mut self, reason: &str) {
+        let id = self.backend.notify(&request_for_outage(reason)).await;
+        if id != 0 {
+            self.outage_id = Some(id);
+            self.shown.insert(id, Shown { message_id: None, link: None, settings: false });
+        }
+    }
+
+    /// Replaces a shown outage alert with "Connected to Gotify again".
+    pub async fn show_reconnected(&mut self) {
+        let Some(old) = self.outage_id.take() else { return };
+        self.shown.remove(&old);
+        let id = self.backend.notify(&request_for_reconnected(old)).await;
+        if id != 0 {
+            self.shown.insert(id, Shown { message_id: None, link: None, settings: false });
+        }
+    }
+
+    /// Removes a shown outage alert (e.g. the login expired instead).
+    pub async fn close_outage(&mut self) {
+        if let Some(id) = self.outage_id.take() {
+            self.shown.remove(&id);
+            self.backend.close(id).await;
+        }
+    }
+
     pub fn on_closed(&mut self, id: u32) {
+        if self.outage_id == Some(id) {
+            self.outage_id = None;
+        }
         self.shown.remove(&id);
         self.down_by_monitor.retain(|_, v| *v != id);
     }
@@ -264,6 +316,21 @@ mod tests {
         async fn close(&mut self, id: u32) {
             self.closed.push(id);
         }
+    }
+
+    #[tokio::test]
+    async fn outage_alert_is_replaced_when_back() {
+        let mut n = Notifier::new(Fake::default());
+        n.show_outage("Last error: connection refused").await;
+        let alert = n.backend().sent[0].clone();
+        assert_eq!(alert.summary, "Can't reach Gotify");
+        assert_eq!(alert.body, "No messages for 5 minutes. Last error: connection refused");
+        assert_eq!(alert.urgency, Urgency::Critical);
+        n.show_reconnected().await;
+        let back = n.backend().sent[1].clone();
+        assert_eq!((back.summary.as_str(), back.urgency, back.replaces_id), ("Connected to Gotify again", Urgency::Normal, 7));
+        n.show_reconnected().await;
+        assert_eq!(n.backend().sent.len(), 2, "no all-clear without an alert");
     }
 
     #[tokio::test]
