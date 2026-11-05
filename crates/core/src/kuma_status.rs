@@ -72,6 +72,8 @@ pub struct KumaMonitor {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct KumaSnapshot {
     pub monitors: Vec<KumaMonitor>,
+    /// When this answer was fetched (None for parsed test data).
+    pub fetched_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -180,7 +182,7 @@ pub fn parse_snapshot(page_json: &str, heartbeat_json: &str) -> Result<KumaSnaps
             }
         })
         .collect();
-    Ok(KumaSnapshot { monitors })
+    Ok(KumaSnapshot { monitors, fetched_at: None })
 }
 
 /// "99.98 %": rounded down, so anything short of perfect never shows 100 %.
@@ -210,7 +212,9 @@ pub async fn fetch_snapshot(page: &StatusPage) -> Result<KumaSnapshot, String> {
         }
     };
     let (page_json, heartbeat_json) = tokio::try_join!(get(page.page_url()), get(page.heartbeat_url()))?;
-    parse_snapshot(&page_json, &heartbeat_json)
+    let mut snapshot = parse_snapshot(&page_json, &heartbeat_json)?;
+    snapshot.fetched_at = Some(Utc::now());
+    Ok(snapshot)
 }
 
 #[cfg(test)]
@@ -274,6 +278,11 @@ mod tests {
         assert_eq!(uptime_label(0.99987), "99.98 %");
         assert_eq!(uptime_label(0.5), "50 %");
         assert_eq!(uptime_label(0.972), "97.2 %");
+    }
+
+    #[test]
+    fn parsed_snapshots_have_no_fetch_time() {
+        assert_eq!(snapshot().fetched_at, None);
     }
 
     #[test]

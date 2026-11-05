@@ -86,7 +86,10 @@ icon would stay green. With a status page, the tray asks Kuma directly every
 5 minutes (and when you open the menu, at most once a minute), so green means
 "every monitor is up" and the menu shows e.g. "Connected — 14 monitors up".
 The status page then decides what's down, and also covers monitors that don't
-send notifications to Gotify.
+send notifications to Gotify. A Kuma message arriving through Gotify still
+changes the icon and lists immediately (it wins over an older status page
+answer), and the tray re-checks the status page about a minute later to
+confirm.
 
 1. In Kuma: **Status Pages → New Status Page**, choose a hard-to-guess slug,
    add all monitors, save. Status pages need no login, so keep Kuma private

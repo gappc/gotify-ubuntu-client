@@ -23,7 +23,7 @@ use crate::backoff::Backoff;
 use crate::outage::Outage;
 use crate::notify::{NotifierSignal, NotifyBackend, Notifier, Target};
 use crate::tray::{DownEntry, IconKind, MonitorLine, MutedEntry, TrayCommand, TrayView};
-use gotify_core::kuma::KumaStatus;
+use gotify_core::kuma::{KumaStatus, parse_kuma};
 use gotify_core::kuma_status::{KumaSnapshot, KumaState, StatusPage, fetch_snapshot};
 use gotify_core::mutes::{MuteFor, MuteTarget, Mutes};
 
@@ -52,6 +52,21 @@ pub enum KumaView<'a> {
     Ok(&'a KumaSnapshot),
     /// Repeatedly unreachable; `last` is the last good answer.
     Failing { last: Option<&'a KumaSnapshot> },
+}
+
+fn with_newer_messages(snapshot: &KumaSnapshot, monitors: &Monitors) -> KumaSnapshot {
+    let mut effective = snapshot.clone();
+    let Some(fetched_at) = snapshot.fetched_at else { return effective };
+    for m in &mut effective.monitors {
+        if let Some(r) = monitors.get(&m.name).filter(|r| r.since > fetched_at) {
+            m.state = match r.status {
+                KumaStatus::Down => KumaState::Down,
+                KumaStatus::Up => KumaState::Up,
+            };
+            m.since = Some(r.since);
+        }
+    }
+    effective
 }
 
 fn kuma_status_line(snapshot: &KumaSnapshot) -> String {
@@ -83,6 +98,10 @@ pub fn tray_view_at(
         KumaView::Failing { last } => *last,
         KumaView::Off | KumaView::Waiting => None,
     };
+    // A Kuma message from Gotify that is newer than the status page's answer
+    // wins for its monitor, so icon and list change together with the pop-up.
+    let snapshot = snapshot.map(|s| with_newer_messages(s, monitors));
+    let snapshot = snapshot.as_ref();
     let status_line = match conn {
         Conn::Connected => {
             let host = server_host.unwrap_or("Gotify");
@@ -90,7 +109,7 @@ pub fn tray_view_at(
                 KumaView::Off => format!("Connected to {host}"),
                 KumaView::Waiting => "Connected — checking Uptime Kuma…".into(),
                 KumaView::Failing { .. } => "Connected — can't reach Uptime Kuma".into(),
-                KumaView::Ok(s) => format!("Connected — {}", kuma_status_line(s)),
+                KumaView::Ok(_) => format!("Connected — {}", kuma_status_line(snapshot.expect("Ok has a snapshot"))),
             }
         }
         Conn::Reconnecting => "Reconnecting…".into(),
@@ -286,6 +305,10 @@ struct Kuma {
     seq: u64,
     last_poll: Option<Instant>,
 }
+
+/// After a Kuma message, ask the status page again once its 60 s cache has
+/// expired, to confirm the new state.
+const KUMA_CONFIRM_AFTER: Duration = Duration::from_secs(65);
 
 /// Failed polls in a row before the tray turns amber (one may be a blip).
 const KUMA_FAILURES_FOR_AMBER: u32 = 2;
@@ -631,6 +654,11 @@ impl<B: NotifyBackend> App<B> {
 
     async fn on_live(&mut self, msg: Message) {
         apply_live(&mut self.state.monitors, &msg);
+        if self.kuma.page.is_some() && parse_kuma(&msg.message).is_some() {
+            // Restart the polling cycle with a confirming check after Kuma's cache.
+            self.kuma.seq += 1;
+            self.schedule(KUMA_CONFIRM_AFTER, Event::KumaPoll(self.kuma.seq));
+        }
         self.message_ids.insert(msg.id);
         if self.state.last_notified_id.is_some_and(|last| msg.id > last) {
             if !self.state.mutes.is_muted(&msg, chrono::Utc::now()) {
@@ -839,6 +867,7 @@ mod tests {
                     uptime_24h: None,
                 })
                 .collect(),
+            fetched_at: None,
         }
     }
 
@@ -864,6 +893,30 @@ mod tests {
         let v = view_with(KumaView::Ok(&snap), &Monitors::new());
         assert_eq!(v.all.iter().map(|m| (m.name.as_str(), m.state)).collect::<Vec<_>>(), [("web01", KumaState::Up), ("db", KumaState::Down)]);
         assert!(view_with(KumaView::Off, &Monitors::new()).all.is_empty());
+    }
+
+    #[test]
+    fn newer_gotify_message_wins_until_the_next_status_page_answer() {
+        // Status page (fetched at t=600) says web01 is up…
+        let mut snap = kuma(&[("web01", KumaState::Up), ("db", KumaState::Up)]);
+        snap.fetched_at = Some(Utc.timestamp_opt(600, 0).unwrap());
+        // …then Gotify delivers "web01 down" at t=900.
+        let mut monitors = Monitors::new();
+        monitors.insert(
+            "web01".into(),
+            MonitorRecord { status: KumaStatus::Down, message_id: 9, since: Utc.timestamp_opt(900, 0).unwrap() },
+        );
+        let v = view_with(KumaView::Ok(&snap), &monitors);
+        assert_eq!(v.icon, IconKind::Down);
+        assert_eq!(v.down[0].monitor, "web01");
+        assert_eq!(v.down[0].message_id, Some(9));
+        assert_eq!(v.status_line, "Connected — 1 of 2 monitors down");
+        assert_eq!(v.all[0].state, KumaState::Down, "the list agrees with the icon");
+
+        // An older message doesn't override a newer status page answer.
+        snap.fetched_at = Some(Utc.timestamp_opt(1000, 0).unwrap());
+        let v = view_with(KumaView::Ok(&snap), &monitors);
+        assert_eq!(v.icon, IconKind::Ok);
     }
 
     #[test]

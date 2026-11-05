@@ -77,7 +77,7 @@ async fn setup(base: &url::Url) -> (gotify_core::model::NewClient, GotifyClient,
 }
 
 async fn start(base: &url::Url, last_notified: i64, sync_delay: Duration) -> Running {
-    start_via(base, base, last_notified, sync_delay, Duration::from_secs(300), None).await
+    start_via(base, base, last_notified, sync_delay, Duration::from_secs(300), None, Duration::from_millis(200)).await
 }
 
 /// Like `start`, but the app talks to `app_url` (e.g. a proxy in front of `base`).
@@ -88,6 +88,7 @@ async fn start_via(
     sync_delay: Duration,
     outage_alert_after: Duration,
     kuma_status_page: Option<String>,
+    kuma_poll_every: Duration,
 ) -> Running {
     let (new, admin, _) = setup(base).await;
     let dir = tempfile::tempdir().unwrap();
@@ -110,7 +111,7 @@ async fn start_via(
         sync_delay,
         outage_alert_after,
         shared_mutes: Default::default(),
-        kuma_poll_every: Duration::from_millis(200),
+        kuma_poll_every,
     };
     let (app, tx, view) = App::new(deps);
     tokio::spawn(app.run());
@@ -216,7 +217,7 @@ async fn outage_alert_and_all_clear() {
     let (_, _, newest) = setup(&base).await;
     let p = proxy(0).await;
     let via: url::Url = format!("http://127.0.0.1:{}/", p.port).parse().unwrap();
-    let mut r = start_via(&base, &via, newest, Duration::ZERO, Duration::from_secs(1), None).await;
+    let mut r = start_via(&base, &via, newest, Duration::ZERO, Duration::from_secs(1), None, Duration::from_millis(200)).await;
     wait_for(&mut r.view, |v| v.status_line.starts_with("Connected")).await;
 
     p.task.abort(); // cut the line: open connections close, new ones are refused
@@ -277,7 +278,7 @@ async fn kuma_status_page_drives_the_tray() {
     let kuma = wiremock::MockServer::start().await;
     kuma_serves(&kuma, 1, 0).await;
     let page = format!("{}/status/s", kuma.uri());
-    let mut r = start_via(&base, &base, newest, Duration::ZERO, Duration::from_secs(300), Some(page)).await;
+    let mut r = start_via(&base, &base, newest, Duration::ZERO, Duration::from_secs(300), Some(page), Duration::from_millis(200)).await;
 
     wait_for(&mut r.view, |v| v.status_line == "Connected — 1 of 2 monitors down").await;
     assert_eq!(r.view.borrow().icon, IconKind::Down);
@@ -288,4 +289,24 @@ async fn kuma_status_page_drives_the_tray() {
 
     kuma.reset().await; // now every request fails
     wait_for(&mut r.view, |v| v.icon == IconKind::Unsure && v.status_line == "Connected — can't reach Uptime Kuma").await;
+}
+
+#[tokio::test]
+async fn gotify_down_turns_the_tray_red_before_the_next_status_page_check() {
+    let Some(base) = base() else { return };
+    let _guard = SERIAL.lock().await;
+    let (_, _, newest) = setup(&base).await;
+    let kuma = wiremock::MockServer::start().await;
+    kuma_serves(&kuma, 1, 1).await; // the status page keeps saying "all up"
+    let page = format!("{}/status/s", kuma.uri());
+    let mut r = start_via(&base, &base, newest, Duration::ZERO, Duration::from_secs(300), Some(page), Duration::from_secs(300)).await;
+    wait_for(&mut r.view, |v| v.status_line == "Connected — 2 monitors up").await;
+
+    tokio::time::sleep(Duration::from_millis(1100)).await; // message must be newer than the answer
+    send_as_kuma(&base, "[db] [🔴 Down] refused", 8).await;
+    wait_for(&mut r.view, |v| v.icon == IconKind::Down && v.status_line == "Connected — 1 of 2 monitors down").await;
+    assert_eq!(r.view.borrow().all[1].state, gotify_core::kuma_status::KumaState::Down);
+
+    send_as_kuma(&base, "[db] [✅ Up] ok", 8).await;
+    wait_for(&mut r.view, |v| v.icon == IconKind::Ok && v.status_line == "Connected — 2 monitors up").await;
 }
