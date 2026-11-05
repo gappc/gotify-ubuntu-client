@@ -78,7 +78,7 @@ is suspended doesn't count.
 
 ## Tray icon
 
-- light: connected, nothing down
+- green: connected, nothing down
 - **red**: at least one Uptime Kuma monitor is down right now
 - grey: not connected, not logged in, or waiting for the keyring
 - blue dot: unread messages

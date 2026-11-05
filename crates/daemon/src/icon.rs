@@ -9,7 +9,7 @@ pub enum IconKind {
     Offline,
 }
 
-const OK: [u8; 3] = [0xf6, 0xf5, 0xf4];
+const OK: [u8; 3] = [0x33, 0xd1, 0x7a]; // GNOME green, as in the app icon
 const DOWN: [u8; 3] = [0xe0, 0x1b, 0x24];
 const OFFLINE: [u8; 3] = [0x77, 0x76, 0x7b];
 const UNREAD: [u8; 3] = [0x35, 0x84, 0xe4];
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn icon_center_colours() {
-        for (kind, rgb) in [(IconKind::Ok, [0xf6, 0xf5, 0xf4]), (IconKind::Down, [0xe0, 0x1b, 0x24]), (IconKind::Offline, [0x77, 0x76, 0x7b])] {
+        for (kind, rgb) in [(IconKind::Ok, [0x33, 0xd1, 0x7a]), (IconKind::Down, [0xe0, 0x1b, 0x24]), (IconKind::Offline, [0x77, 0x76, 0x7b])] {
             let icon = render(kind, false, 44);
             assert_eq!(pixel(&icon, 22, 30), [0xff, rgb[0], rgb[1], rgb[2]], "{kind:?}");
         }
