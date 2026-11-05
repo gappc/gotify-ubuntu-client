@@ -22,8 +22,8 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 zbus = { version = "6", default-features = false, features = ["tokio"] }
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
-gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }
-adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
 async-channel = "2"
 tempfile = "3"
 wiremock = "0.6"
