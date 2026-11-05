@@ -81,6 +81,15 @@ it sends a new message. Deleting a monitor's Down message also clears it.
 The app checks with the server when the menu opens, when the message window
 closes, and every 15 minutes.
 
+## Search
+
+In the message window press **Ctrl+F**, click the search icon, or just start
+typing. Every word must appear (upper/lower case doesn't matter) in the title,
+the text, the monitor name or the app name, e.g. `lynq prod` or `backup`.
+**Down only** keeps the messages shown in red: Uptime Kuma Down messages and
+other high-priority ones. Search covers the full history of the selected app;
+close the search bar (or press Esc) to see everything again.
+
 ## Files
 
 | What | Where |

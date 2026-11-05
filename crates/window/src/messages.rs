@@ -13,6 +13,7 @@ use gotify_core::model::{Application, Message, PagedMessages};
 use gotify_core::secret::load_token;
 use gotify_core::stream::connect_stream;
 
+use crate::filter::{Search, matches};
 use crate::row::{message_row, row_message_id};
 use crate::rt::{DaemonCall, daemon_last_read, notify_daemon, runtime, spawn_ui};
 use crate::settings::open_settings;
@@ -57,6 +58,9 @@ struct Model {
     stream: Option<tokio::task::JoinHandle<()>>,
     /// Bumped whenever the list is replaced; results of older requests are dropped.
     view: u64,
+    search: Search,
+    /// Full history of the current app filter, loaded when searching.
+    history: Option<Vec<Message>>,
 }
 
 impl Model {
@@ -89,6 +93,7 @@ struct Ui {
     status_button: gtk::Button,
     delete_all: gtk::Button,
     title: adw::WindowTitle,
+    search_bar: gtk::SearchBar,
 }
 
 impl MessagesWindow {
@@ -98,6 +103,12 @@ impl MessagesWindow {
 
     /// Scroll to a message, loading older pages until it's found.
     pub fn focus(&self, id: i64) {
+        if self.model.borrow().search.is_active() {
+            // Leaving search reloads the full list, which then finds the message.
+            self.model.borrow_mut().focus = Some(id);
+            self.ui.search_bar.set_search_mode(false);
+            return;
+        }
         self.model.borrow_mut().focus = Some(id);
         try_focus(&self.ui, &self.model);
     }
@@ -117,6 +128,21 @@ pub fn build_window(app: &adw::Application, focus_message: Option<i64>) -> Messa
     let menu = gtk::gio::Menu::new();
     menu.append(Some("Settings"), Some("win.settings"));
     header.pack_end(&gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).build());
+    let search_button = gtk::ToggleButton::builder().icon_name("system-search-symbolic").tooltip_text("Search (Ctrl+F)").build();
+    header.pack_end(&search_button);
+
+    let search_entry = gtk::SearchEntry::builder().placeholder_text("Search messages").hexpand(true).build();
+    let down_only = gtk::ToggleButton::builder()
+        .label("Down only")
+        .tooltip_text("Only messages shown in red: Uptime Kuma Down and other high-priority messages")
+        .build();
+    let search_box = gtk::Box::builder().spacing(8).width_request(420).build();
+    search_box.append(&search_entry);
+    search_box.append(&down_only);
+    let search_bar = gtk::SearchBar::builder().child(&search_box).show_close_button(true).build();
+    search_bar.connect_entry(&search_entry);
+    search_bar.set_key_capture_widget(Some(&window));
+    search_button.bind_property("active", &search_bar, "search-mode-enabled").bidirectional().build();
 
     let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).valign(gtk::Align::Start).build();
     let clamp = adw::Clamp::builder().maximum_size(820).margin_top(12).margin_bottom(12).margin_start(12).margin_end(12).child(&list).build();
@@ -133,6 +159,7 @@ pub fn build_window(app: &adw::Application, focus_message: Option<i64>) -> Messa
 
     let content = adw::ToolbarView::new();
     content.add_top_bar(&header);
+    content.add_top_bar(&search_bar);
     content.set_content(Some(&stack));
 
     let sidebar = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
@@ -145,7 +172,20 @@ pub fn build_window(app: &adw::Application, focus_message: Option<i64>) -> Messa
     toasts.set_child(Some(&split));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), toasts, split, sidebar, list, scrolled, stack, status, status_button, delete_all, title });
+    let ui = Rc::new(Ui {
+        window: window.clone(),
+        toasts,
+        split,
+        sidebar,
+        list,
+        scrolled,
+        stack,
+        status,
+        status_button,
+        delete_all,
+        title,
+        search_bar: search_bar.clone(),
+    });
     let model = Rc::new(RefCell::new(Model { focus: focus_message, ..Model::default() }));
 
     let settings = gtk::gio::SimpleAction::new("settings", None);
@@ -154,6 +194,38 @@ pub fn build_window(app: &adw::Application, focus_message: Option<i64>) -> Messa
         settings.connect_activate(move |_, _| open_settings_for(&ui, &model));
     }
     window.add_action(&settings);
+    let search_action = gtk::gio::SimpleAction::new("search", None);
+    {
+        let search_bar = search_bar.clone();
+        search_action.connect_activate(move |_, _| search_bar.set_search_mode(!search_bar.is_search_mode()));
+    }
+    window.add_action(&search_action);
+    {
+        let (ui2, model) = (ui.clone(), model.clone());
+        search_entry.connect_search_changed(move |entry| {
+            model.borrow_mut().search.text = entry.text().to_string();
+            load_list(&ui2, &model);
+        });
+    }
+    {
+        let (ui2, model) = (ui.clone(), model.clone());
+        down_only.connect_toggled(move |button| {
+            model.borrow_mut().search.down_only = button.is_active();
+            load_list(&ui2, &model);
+        });
+    }
+    {
+        // Closing the search bar clears the search and shows everything again.
+        let (ui2, model, entry, toggle) = (ui.clone(), model.clone(), search_entry.clone(), down_only.clone());
+        search_bar.connect_search_mode_enabled_notify(move |bar| {
+            if !bar.is_search_mode() && model.borrow().search.is_active() {
+                model.borrow_mut().search = Search::default();
+                entry.set_text("");
+                toggle.set_active(false);
+                load_list(&ui2, &model);
+            }
+        });
+    }
     {
         let (ui2, model) = (ui.clone(), model.clone());
         ui.scrolled.connect_edge_reached(move |_, edge| {
@@ -169,6 +241,7 @@ pub fn build_window(app: &adw::Application, focus_message: Option<i64>) -> Messa
             let filter = row.widget_name().strip_prefix("app-").and_then(|id| id.parse().ok());
             if model.borrow().filter != filter {
                 model.borrow_mut().filter = filter;
+                model.borrow_mut().history = None;
                 load_list(&ui2, &model);
             }
         });
@@ -275,9 +348,14 @@ fn reload(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
                 m.apps = loaded.apps;
                 m.client = Some(loaded.client);
                 m.filter = None;
+                m.history = None;
             }
             fill_sidebar(&ui, &model);
-            show_page(&ui, &model, loaded.first, true);
+            if model.borrow().search.is_active() {
+                load_list(&ui, &model);
+            } else {
+                show_page(&ui, &model, loaded.first, true);
+            }
             start_stream(&ui, &model);
             mark_newest_read(&ui, &model);
         }
@@ -385,8 +463,11 @@ fn update_title(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
     ui.title.set_subtitle(&host);
 }
 
-/// Loads the first page for the current filter.
+/// Loads the first page for the current filter, or the search results.
 fn load_list(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
+    if model.borrow().search.is_active() {
+        return search_list(ui, model);
+    }
     let (client, filter) = {
         let m = model.borrow();
         (m.client.clone(), m.filter)
@@ -400,6 +481,61 @@ fn load_list(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
         Ok(page) => show_page(&ui, &model, page, true),
         Err(e) => show_problem(&ui, &model, e.into()),
     });
+}
+
+/// Search runs over the full history of the current app, loaded once.
+fn search_list(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
+    if model.borrow().history.is_some() {
+        return show_search_results(ui, model);
+    }
+    let (client, filter) = {
+        let m = model.borrow();
+        (m.client.clone(), m.filter)
+    };
+    let Some(client) = client else { return };
+    ui.stack.set_visible_child_name("loading");
+    let view = model.borrow_mut().begin_view();
+    let (ui, model) = (ui.clone(), model.clone());
+    spawn_ui(async move { client.all_messages_of(filter).await }, move |result| match result {
+        _ if !model.borrow().is_current(view) => {}
+        Ok(all) => {
+            model.borrow_mut().history = Some(all);
+            show_search_results(&ui, &model);
+        }
+        Err(e) => show_problem(&ui, &model, e.into()),
+    });
+}
+
+fn show_search_results(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
+    model.borrow_mut().begin_view();
+    while let Some(row) = ui.list.row_at_index(0) {
+        ui.list.remove(&row);
+    }
+    let found: Vec<Message> = {
+        let m = model.borrow();
+        m.history
+            .iter()
+            .flatten()
+            .filter(|msg| matches(msg, app_name(&m, msg.appid).as_deref(), &m.search))
+            .cloned()
+            .collect()
+    };
+    model.borrow_mut().next_since = None;
+    for msg in &found {
+        add_row(ui, model, msg, false);
+    }
+    update_title(ui, model);
+    if found.is_empty() {
+        ui.status.set_icon_name(Some("system-search-symbolic"));
+        ui.status.set_title("No matching messages");
+        ui.status.set_description(Some("Try other words, or turn off “Down only”."));
+        ui.status.set_child(gtk::Widget::NONE);
+        ui.stack.set_visible_child_name("status");
+    } else {
+        ui.stack.set_visible_child_name("list");
+        ui.scrolled.vadjustment().set_value(0.0);
+    }
+    ui.delete_all.set_sensitive(false);
 }
 
 fn load_more(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
@@ -469,6 +605,9 @@ fn delete_one(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>, id: i64) {
     let (ui, model) = (ui.clone(), model.clone());
     spawn_ui(async move { client.delete_message(id).await }, move |result| match result {
         Ok(()) => {
+            if let Some(history) = model.borrow_mut().history.as_mut() {
+                history.retain(|m| m.id != id);
+            }
             if let Some(row) = find_row(&ui.list, id) {
                 // Keep the reading position: move focus to a neighbour first.
                 let index = row.index();
@@ -513,7 +652,10 @@ fn confirm_delete_all(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
             }
         };
         spawn_ui(work, move |result| match result {
-            Ok(()) => load_list(&ui, &model),
+            Ok(()) => {
+                model.borrow_mut().history = None;
+                load_list(&ui, &model);
+            }
             Err(e) => toast(&ui, &format!("Couldn't delete messages: {e}")),
         });
     });
@@ -555,9 +697,19 @@ fn start_stream(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
         while let Ok(msg) = rx.recv().await {
             let filter = model.borrow().filter;
             if filter.is_none_or(|f| f == msg.appid) {
-                add_row(&ui, &model, &msg, true);
-                ui.stack.set_visible_child_name("list");
-                ui.delete_all.set_sensitive(true);
+                let (searching, shown) = {
+                    let mut m = model.borrow_mut();
+                    if let Some(history) = m.history.as_mut() {
+                        history.insert(0, msg.clone());
+                    }
+                    let name = app_name(&m, msg.appid);
+                    (m.search.is_active(), matches(&msg, name.as_deref(), &m.search))
+                };
+                if shown {
+                    add_row(&ui, &model, &msg, true);
+                    ui.stack.set_visible_child_name("list");
+                    ui.delete_all.set_sensitive(!searching);
+                }
             }
             if ui.window.is_active() && filter.is_none() {
                 notify_daemon(DaemonCall::MarkRead(msg.id));

@@ -1,6 +1,7 @@
 //! gotify-tray-window: message list and settings. Started on demand by the
 //! background service; exits when its window closes.
 
+mod filter;
 mod messages;
 mod row;
 mod rt;
@@ -78,6 +79,7 @@ fn main() -> gtk::glib::ExitCode {
         .build();
     app.connect_startup(|app| {
         app.set_accels_for_action("window.close", &["<Control>w"]);
+        app.set_accels_for_action("win.search", &["<Control>f"]);
         let css = gtk::CssProvider::new();
         css.load_from_string("row.highlight { background-color: alpha(@accent_bg_color, 0.3); transition: background-color 400ms; }");
         if let Some(display) = gtk::gdk::Display::default() {

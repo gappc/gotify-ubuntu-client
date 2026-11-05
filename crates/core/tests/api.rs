@@ -140,3 +140,23 @@ async fn same_host_redirect_is_followed() {
     let client = GotifyClient::new(server.uri().parse().unwrap(), "T".into());
     assert_eq!(client.applications().await.unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn all_messages_of_one_app_pages_the_app_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/application/3/message"))
+        .and(query_param("since", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page([4].into_iter(), 4, None)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/application/3/message"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page([6, 5].into_iter(), 5, Some("/application/3/message?since=5"))))
+        .with_priority(10)
+        .mount(&server)
+        .await;
+    let client = GotifyClient::new(server.uri().parse().unwrap(), "T".into());
+    let ids: Vec<_> = client.all_messages_of(Some(3)).await.unwrap().iter().map(|m| m.id).collect();
+    assert_eq!(ids, [6, 5, 4]);
+}

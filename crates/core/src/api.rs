@@ -122,21 +122,26 @@ impl GotifyClient {
     }
 
     pub async fn all_messages(&self) -> Result<Vec<Message>, ApiError> {
-        self.collect_pages(|_| false).await
+        self.all_messages_of(None).await
+    }
+
+    /// Full history, newest first, optionally for one app.
+    pub async fn all_messages_of(&self, app: Option<i64>) -> Result<Vec<Message>, ApiError> {
+        self.collect_pages(app, |_| false).await
     }
 
     /// Messages with an id above `id`, newest first; stops paging early.
     pub async fn messages_newer_than(&self, id: i64) -> Result<Vec<Message>, ApiError> {
-        let mut msgs = self.collect_pages(|page| page.messages.iter().any(|m| m.id <= id)).await?;
+        let mut msgs = self.collect_pages(None, |page| page.messages.iter().any(|m| m.id <= id)).await?;
         msgs.retain(|m| m.id > id);
         Ok(msgs)
     }
 
-    async fn collect_pages(&self, stop: impl Fn(&PagedMessages) -> bool) -> Result<Vec<Message>, ApiError> {
+    async fn collect_pages(&self, app: Option<i64>, stop: impl Fn(&PagedMessages) -> bool) -> Result<Vec<Message>, ApiError> {
         let mut all = Vec::new();
         let mut since = None;
         loop {
-            let page = self.messages_page(None, since).await?;
+            let page = self.messages_page(app, since).await?;
             let done = stop(&page) || page.paging.next.as_deref().is_none_or(str::is_empty) || page.messages.is_empty();
             since = Some(page.paging.since);
             all.extend(page.messages);
