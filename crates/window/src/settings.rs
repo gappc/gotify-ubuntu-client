@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gotify_core::api::{ApiError, GotifyClient, create_client, server_info};
+use gotify_core::api::{ApiError, GotifyClient, create_client, delete_client_with_password, server_info};
 use gotify_core::files::{Config, Paths, load_config, remove_config, save_config};
 use gotify_core::secret::{delete_token, store_token};
 use url::Url;
@@ -222,11 +222,19 @@ fn logged_out_group(dialog: &adw::PreferencesDialog, on_changed: OnChanged, note
             let name = client_name(&gtk::glib::host_name());
             let work = async move {
                 let new = create_client(&url2, &user, &pass, &name).await.map_err(|e| explain(&e, &url2))?;
-                let me = GotifyClient::new(url2.clone(), new.token.clone())
-                    .current_user()
-                    .await
-                    .map_err(|e| explain(&e, &url2))?;
-                save_login(&url2, &new.token, Some(new.id), Some(new.name), me.name).await
+                let finish = async {
+                    let me = GotifyClient::new(url2.clone(), new.token.clone())
+                        .current_user()
+                        .await
+                        .map_err(|e| explain(&e, &url2))?;
+                    save_login(&url2, &new.token, Some(new.id), Some(new.name.clone()), me.name).await
+                };
+                let result = finish.await;
+                if result.is_err() {
+                    // Don't leave an unused client behind in Gotify.
+                    let _ = delete_client_with_password(&url2, &user, &pass, new.id).await;
+                }
+                result
             };
             spawn_ui(work, done);
         }

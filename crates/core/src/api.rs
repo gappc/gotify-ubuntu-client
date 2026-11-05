@@ -188,3 +188,9 @@ pub async fn create_client(base: &Url, user: &str, password: &str, name: &str) -
         .json(&serde_json::json!({ "name": name }));
     json(req).await
 }
+
+/// Removes a client using the password (Basic auth is always elevated in
+/// Gotify 3), e.g. to clean up after a login that failed halfway.
+pub async fn delete_client_with_password(base: &Url, user: &str, password: &str, id: i64) -> Result<(), ApiError> {
+    send(http().delete(endpoint(base, &format!("client/{id}"))).basic_auth(user, Some(password))).await.map(drop)
+}

@@ -1,4 +1,4 @@
-use gotify_core::api::{ApiError, GotifyClient, create_client, endpoint};
+use gotify_core::api::{ApiError, GotifyClient, create_client, delete_client_with_password, endpoint};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -159,4 +159,17 @@ async fn all_messages_of_one_app_pages_the_app_endpoint() {
     let client = GotifyClient::new(server.uri().parse().unwrap(), "T".into());
     let ids: Vec<_> = client.all_messages_of(Some(3)).await.unwrap().iter().map(|m| m.id).collect();
     assert_eq!(ids, [6, 5, 4]);
+}
+
+#[tokio::test]
+async fn client_can_be_removed_with_the_password() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/client/12"))
+        .and(header("Authorization", "Basic dTpw"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    delete_client_with_password(&server.uri().parse().unwrap(), "u", "p", 12).await.unwrap();
 }

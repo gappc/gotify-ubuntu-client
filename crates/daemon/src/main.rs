@@ -31,16 +31,6 @@ fn main() {
 
 async fn run() -> zbus::Result<()> {
     let conn = zbus::Connection::session().await?;
-    let owner = matches!(
-        conn.request_name_with_flags(BUS_NAME, RequestNameFlags::DO_NOT_QUEUE).await,
-        Ok(RequestNameReply::PrimaryOwner)
-    );
-    if !owner {
-        // Already running: open its window instead.
-        GotifyTrayProxy::new(&conn).await?.show_window(0).await?;
-        return Ok(());
-    }
-
     let backend = DbusBackend::new(&conn).await?;
     let notifier_signals = backend.signals().await?;
     let last_read = Arc::new(AtomicI64::new(0));
@@ -55,7 +45,18 @@ async fn run() -> zbus::Result<()> {
     };
     let (app, tx, mut view) = App::new(deps);
 
+    // Serve the interface before taking the name, so a second start that
+    // finds the name can always call it.
     conn.object_server().at(OBJECT_PATH, Service { tx: tx.clone(), last_read }).await?;
+    let owner = matches!(
+        conn.request_name_with_flags(BUS_NAME, RequestNameFlags::DO_NOT_QUEUE).await,
+        Ok(RequestNameReply::PrimaryOwner)
+    );
+    if !owner {
+        // Already running: open its window instead.
+        GotifyTrayProxy::new(&conn).await?.show_window(0).await?;
+        return Ok(());
+    }
 
     let (tray_tx, mut tray_rx) = tokio::sync::mpsc::unbounded_channel();
     let tray = GotifyTray::new(tray_tx).spawn().await.map_err(|e| zbus::Error::Failure(format!("tray icon: {e}")))?;

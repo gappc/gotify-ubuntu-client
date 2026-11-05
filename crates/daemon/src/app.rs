@@ -43,8 +43,11 @@ pub fn tray_view(conn: &Conn, server_host: Option<&str>, monitors: &Monitors, un
         Conn::WaitingForKeyring => "Waiting for keyring".into(),
         Conn::LoginExpired => "Login expired — open Settings".into(),
     };
+    // Without a working login the old "down" list may be stale; don't show it.
+    let online = matches!(conn, Conn::Connected | Conn::Reconnecting | Conn::Connecting);
     let down: Vec<DownEntry> = down_list(monitors)
         .into_iter()
+        .filter(|_| online)
         .map(|(name, r)| DownEntry { monitor: name.to_string(), message_id: r.message_id, since: r.since })
         .collect();
     // A known outage stays visible while reconnecting.
@@ -536,6 +539,10 @@ mod tests {
 
         let v = tray_view(&Conn::Connected, Some("h"), &Monitors::new(), 0);
         assert_eq!(v.icon, IconKind::Ok);
+
+        for conn in [Conn::NotConfigured, Conn::LoginExpired, Conn::WaitingForKeyring] {
+            assert!(tray_view(&conn, None, &monitors_with_down(), 0).down.is_empty(), "{conn:?} shows stale outages");
+        }
 
         let v = tray_view(&Conn::NotConfigured, None, &Monitors::new(), 0);
         assert_eq!((v.icon, v.status_line.as_str()), (IconKind::Offline, "Not configured — open Settings"));

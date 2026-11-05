@@ -11,7 +11,7 @@ use gotify_core::consts::STREAM_SILENCE_TIMEOUT;
 use gotify_core::files::{Paths, load_config};
 use gotify_core::model::{Application, Message, PagedMessages};
 use gotify_core::secret::load_token;
-use gotify_core::stream::connect_stream;
+use gotify_core::stream::{MessageStream, connect_stream};
 
 use crate::filter::{Search, matches};
 use crate::row::{message_row, row_message_id};
@@ -41,6 +41,27 @@ struct Loaded {
     apps: Vec<Application>,
     first: PagedMessages,
     last_read: Option<i64>,
+    /// Opened before the first page was fetched, so no message falls between.
+    stream: Option<MessageStream>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StreamRetry {
+    LoginExpired,
+    After(Duration),
+}
+
+/// What to do when (re)connecting the live stream failed.
+fn after_stream_error(e: &ApiError) -> StreamRetry {
+    match e {
+        ApiError::Unauthorized => StreamRetry::LoginExpired,
+        _ => StreamRetry::After(Duration::from_secs(5)),
+    }
+}
+
+enum Live {
+    Message(Message),
+    LoginExpired,
 }
 
 #[derive(Default)]
@@ -326,10 +347,15 @@ fn reload(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
             Err(e) => return Err(Problem::Other(e.to_string())),
         };
         let client = GotifyClient::new(config.server_url, token);
+        let stream = match connect_stream(client.base(), client.token(), STREAM_SILENCE_TIMEOUT).await {
+            Ok(s) => Some(s),
+            Err(ApiError::Unauthorized) => return Err(Problem::LoginExpired),
+            Err(_) => None, // the live loop retries
+        };
         let apps = client.applications().await?;
         let first = client.messages_page(None, None).await?;
         let last_read = daemon_last_read().await;
-        Ok(Loaded { client, apps, first, last_read })
+        Ok(Loaded { client, apps, first, last_read, stream })
     };
     let (ui, model) = (ui.clone(), model.clone());
     spawn_ui(work, move |result| match result {
@@ -356,7 +382,7 @@ fn reload(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
             } else {
                 show_page(&ui, &model, loaded.first, true);
             }
-            start_stream(&ui, &model);
+            start_stream(&ui, &model, loaded.stream);
             mark_newest_read(&ui, &model);
         }
     });
@@ -674,29 +700,51 @@ fn mark_newest_read(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
     }
 }
 
-/// Live updates while the window is open; reconnects every 5 s if needed.
-fn start_stream(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
+/// Live updates while the window is open; reconnects every 5 s if needed and
+/// stops (showing "Login expired") if the server rejects the token.
+fn start_stream(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>, first: Option<MessageStream>) {
     if let Some(old) = model.borrow_mut().stream.take() {
         old.abort();
     }
     let Some(client) = model.borrow().client.clone() else { return };
-    let (tx, rx) = async_channel::unbounded::<Message>();
+    let (tx, rx) = async_channel::unbounded::<Live>();
     let task = runtime().spawn(async move {
+        let mut next = first;
         loop {
-            if let Ok(mut stream) = connect_stream(client.base(), client.token(), STREAM_SILENCE_TIMEOUT).await {
+            if let Some(mut stream) = next.take() {
                 while let Ok(msg) = stream.next().await {
-                    if tx.send(msg).await.is_err() {
+                    if tx.send(Live::Message(msg)).await.is_err() {
                         return;
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            match connect_stream(client.base(), client.token(), STREAM_SILENCE_TIMEOUT).await {
+                Ok(stream) => next = Some(stream),
+                Err(e) => match after_stream_error(&e) {
+                    StreamRetry::LoginExpired => {
+                        let _ = tx.send(Live::LoginExpired).await;
+                        return;
+                    }
+                    StreamRetry::After(wait) => tokio::time::sleep(wait).await,
+                },
+            }
         }
     });
     model.borrow_mut().stream = Some(task);
     let (ui, model) = (ui.clone(), model.clone());
     gtk::glib::spawn_future_local(async move {
-        while let Ok(msg) = rx.recv().await {
+        while let Ok(live) = rx.recv().await {
+            let msg = match live {
+                Live::Message(msg) => msg,
+                Live::LoginExpired => {
+                    show_problem(&ui, &model, Problem::LoginExpired);
+                    return;
+                }
+            };
+            // Already listed: it arrived in the first page and on the stream.
+            if find_row(&ui.list, msg.id).is_some() {
+                continue;
+            }
             let filter = model.borrow().filter;
             if filter.is_none_or(|f| f == msg.appid) {
                 let (searching, shown) = {
@@ -736,6 +784,12 @@ mod tests {
         let ci = m.begin_view(); // user switched to "CI" before it arrived
         assert!(!m.is_current(all));
         assert!(m.is_current(ci));
+    }
+
+    #[test]
+    fn live_updates_stop_when_the_login_is_rejected() {
+        assert_eq!(after_stream_error(&ApiError::Unauthorized), StreamRetry::LoginExpired);
+        assert_eq!(after_stream_error(&ApiError::Network("down".into())), StreamRetry::After(Duration::from_secs(5)));
     }
 
     #[test]

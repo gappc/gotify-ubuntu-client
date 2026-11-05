@@ -73,8 +73,11 @@ fn handle(app: &adw::Application, args: Args) {
 }
 
 fn main() -> gtk::glib::ExitCode {
+    // Development: a separate ID keeps a test copy from being handed to the
+    // user's running window.
+    let app_id = std::env::var("GOTIFY_TRAY_WINDOW_APP_ID").unwrap_or_else(|_| WINDOW_APP_ID.to_string());
     let app = adw::Application::builder()
-        .application_id(WINDOW_APP_ID)
+        .application_id(app_id.as_str())
         .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
     app.connect_startup(|app| {

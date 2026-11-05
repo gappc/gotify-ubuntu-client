@@ -26,7 +26,12 @@ fn unavailable(e: oo7::dbus::Error) -> SecretError {
 
 async fn unlocked_collection() -> Result<Collection, SecretError> {
     let service = Service::new().await.map_err(unavailable)?;
-    let collection = service.default_collection().await.map_err(unavailable)?;
+    // `default_collection()` would create a missing keyring, which prompts.
+    let collection = service
+        .with_alias(Service::DEFAULT_COLLECTION)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| SecretError::Unavailable("there is no default keyring".into()))?;
     if collection.is_locked().await.map_err(unavailable)? {
         return Err(SecretError::Locked);
     }

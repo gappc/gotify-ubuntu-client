@@ -120,5 +120,6 @@ tests/seed.sh send 8 "[web01] [🔴 Down] test"                  # send a Kuma-s
 tests/seed.sh down                     # stop and discard the test server
 ```
 
-Integration tests never touch a real server. `examples/inspect.rs` does a
+Integration tests never touch a real server. To run a test copy of the window
+while your own is open, set `GOTIFY_TRAY_WINDOW_APP_ID=dev.gotifytray.Test`. `examples/inspect.rs` does a
 read-only check against a real one (`GOTIFY_URL`, `GOTIFY_TOKEN`).
