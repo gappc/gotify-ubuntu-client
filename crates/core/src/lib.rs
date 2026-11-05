@@ -3,4 +3,5 @@
 pub mod consts;
 pub mod kuma;
 pub mod model;
+pub mod monitors;
 pub mod rules;
