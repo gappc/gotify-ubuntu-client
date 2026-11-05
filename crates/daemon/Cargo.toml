@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 gotify-core.workspace = true
 zbus.workspace = true
+ksni.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync", "process", "signal"] }
 futures-util.workspace = true
 chrono.workspace = true
