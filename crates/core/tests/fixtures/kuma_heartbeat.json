@@ -1,0 +1,7 @@
+{"heartbeatList":{
+  "1":[{"status":1,"time":"2026-11-05 21:00:00.000","msg":"200 - OK","ping":12},{"status":1,"time":"2026-11-05 22:00:00.000","msg":"200 - OK","ping":11}],
+  "2":[{"status":1,"time":"2026-11-05 20:00:00.000","msg":"","ping":3},{"status":0,"time":"2026-11-05 21:30:00.123","msg":"connect ECONNREFUSED","ping":null},{"status":0,"time":"2026-11-05 22:00:00.000","msg":"connect ECONNREFUSED","ping":null}],
+  "3":[{"status":3,"time":"2026-11-05 22:00:00.000","msg":"","ping":null}],
+  "4":[{"status":2,"time":"2026-11-05 22:00:00.000","msg":"retrying","ping":null}],
+  "5":[]},
+ "uptimeList":{"1_24":1,"2_24":0.5}}

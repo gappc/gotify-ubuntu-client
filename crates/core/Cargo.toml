@@ -15,7 +15,7 @@ thiserror.workspace = true
 reqwest.workspace = true
 oo7.workspace = true
 zbus.workspace = true
-tokio = { workspace = true, features = ["time", "net"] }
+tokio = { workspace = true, features = ["time", "net", "macros"] }
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 

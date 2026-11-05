@@ -7,11 +7,14 @@ pub enum IconKind {
     Down,
     #[default]
     Offline,
+    /// Messages arrive, but the Uptime Kuma status page can't confirm all is up.
+    Unsure,
 }
 
 const OK: [u8; 3] = [0x33, 0xd1, 0x7a]; // GNOME green, as in the app icon
 const DOWN: [u8; 3] = [0xe0, 0x1b, 0x24];
 const OFFLINE: [u8; 3] = [0x77, 0x76, 0x7b];
+const UNSURE: [u8; 3] = [0xf5, 0xc2, 0x11]; // GNOME yellow
 const UNREAD: [u8; 3] = [0x35, 0x84, 0xe4];
 
 /// How much of the pixel centred at (px, py) lies inside the circle (0..1),
@@ -38,6 +41,7 @@ pub fn render(kind: IconKind, unread: bool, size: i32) -> ksni::Icon {
         IconKind::Ok => OK,
         IconKind::Down => DOWN,
         IconKind::Offline => OFFLINE,
+        IconKind::Unsure => UNSURE,
     };
     let s = size as f32;
     let mut data = Vec::with_capacity((size * size * 4) as usize);
@@ -66,7 +70,7 @@ mod tests {
 
     #[test]
     fn icon_center_colours() {
-        for (kind, rgb) in [(IconKind::Ok, [0x33, 0xd1, 0x7a]), (IconKind::Down, [0xe0, 0x1b, 0x24]), (IconKind::Offline, [0x77, 0x76, 0x7b])] {
+        for (kind, rgb) in [(IconKind::Ok, [0x33, 0xd1, 0x7a]), (IconKind::Down, [0xe0, 0x1b, 0x24]), (IconKind::Offline, [0x77, 0x76, 0x7b]), (IconKind::Unsure, [0xf5, 0xc2, 0x11])] {
             let icon = render(kind, false, 44);
             assert_eq!(pixel(&icon, 22, 30), [0xff, rgb[0], rgb[1], rgb[2]], "{kind:?}");
         }

@@ -1,0 +1,7 @@
+{"config":{"slug":"x","title":"Desktop"},"incidents":[],"maintenanceList":[],
+ "publicGroupList":[{"id":1,"name":"Services","weight":1,"monitorList":[
+   {"id":1,"name":"web01","sendUrl":0,"type":"http"},
+   {"id":2,"name":"db","sendUrl":0,"type":"port"},
+   {"id":3,"name":"backup","sendUrl":0,"type":"push"},
+   {"id":4,"name":"api","sendUrl":0,"type":"http"},
+   {"id":5,"name":"new-monitor","sendUrl":0,"type":"http"}]}]}

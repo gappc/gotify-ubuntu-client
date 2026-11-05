@@ -24,6 +24,7 @@ use crate::outage::Outage;
 use crate::notify::{NotifierSignal, NotifyBackend, Notifier, Target};
 use crate::tray::{DownEntry, IconKind, MutedEntry, TrayCommand, TrayView};
 use gotify_core::kuma::KumaStatus;
+use gotify_core::kuma_status::{KumaSnapshot, KumaState, StatusPage, fetch_snapshot};
 use gotify_core::mutes::{MuteFor, MuteTarget, Mutes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,9 +39,35 @@ pub enum Conn {
 
 #[cfg(test)]
 pub fn tray_view(conn: &Conn, server_host: Option<&str>, monitors: &Monitors, unread: usize) -> TrayView {
-    tray_view_at(conn, server_host, monitors, unread, &Mutes::default(), &HashMap::new(), chrono::Utc::now())
+    tray_view_at(conn, server_host, monitors, unread, &Mutes::default(), &HashMap::new(), chrono::Utc::now(), &KumaView::Off)
 }
 
+/// What the Uptime Kuma status page says, as far as the tray is concerned.
+#[derive(Debug, Clone, Copy)]
+pub enum KumaView<'a> {
+    /// No status page configured: outages come from Gotify messages.
+    Off,
+    /// Configured, first answer not in yet.
+    Waiting,
+    Ok(&'a KumaSnapshot),
+    /// Repeatedly unreachable; `last` is the last good answer.
+    Failing { last: Option<&'a KumaSnapshot> },
+}
+
+fn kuma_status_line(snapshot: &KumaSnapshot) -> String {
+    let c = snapshot.counts();
+    let mut line = if c.down > 0 {
+        format!("{} of {} monitors down", c.down, c.total)
+    } else {
+        format!("{} monitors up", c.up)
+    };
+    if c.maintenance > 0 {
+        line.push_str(&format!(", {} in maintenance", c.maintenance));
+    }
+    line
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn tray_view_at(
     conn: &Conn,
     server_host: Option<&str>,
@@ -49,9 +76,23 @@ pub fn tray_view_at(
     mutes: &Mutes,
     app_names: &HashMap<i64, String>,
     now: chrono::DateTime<chrono::Utc>,
+    kuma: &KumaView,
 ) -> TrayView {
+    let snapshot = match kuma {
+        KumaView::Ok(s) => Some(*s),
+        KumaView::Failing { last } => *last,
+        KumaView::Off | KumaView::Waiting => None,
+    };
     let status_line = match conn {
-        Conn::Connected => format!("Connected to {}", server_host.unwrap_or("Gotify")),
+        Conn::Connected => {
+            let host = server_host.unwrap_or("Gotify");
+            match kuma {
+                KumaView::Off => format!("Connected to {host}"),
+                KumaView::Waiting => "Connected — checking Uptime Kuma…".into(),
+                KumaView::Failing { .. } => "Connected — can't reach Uptime Kuma".into(),
+                KumaView::Ok(s) => format!("Connected — {}", kuma_status_line(s)),
+            }
+        }
         Conn::Reconnecting => "Reconnecting…".into(),
         Conn::Connecting => "Connecting…".into(),
         Conn::NotConfigured => "Not configured — open Settings".into(),
@@ -61,11 +102,28 @@ pub fn tray_view_at(
     // Without a working login the old "down" list may be stale; don't show it.
     let online = matches!(conn, Conn::Connected | Conn::Reconnecting | Conn::Connecting);
     let monitor_muted = |name: &str| mutes.is_target_muted(&MuteTarget::Monitor(name.to_string()), now);
-    let down: Vec<DownEntry> = down_list(monitors)
-        .into_iter()
-        .filter(|(name, _)| online && !monitor_muted(name))
-        .map(|(name, r)| DownEntry { monitor: name.to_string(), message_id: r.message_id, since: r.since })
-        .collect();
+    // The Gotify Down message for a monitor, if history has one.
+    let message_of = |name: &str| monitors.get(name).filter(|r| r.status == KumaStatus::Down).map(|r| r.message_id);
+    // Current outages: from Kuma when configured, else inferred from messages.
+    let outages: Vec<DownEntry> = match (kuma, snapshot) {
+        (KumaView::Off, _) => down_list(monitors)
+            .into_iter()
+            .map(|(name, r)| DownEntry { monitor: name.to_string(), message_id: Some(r.message_id), since: r.since, clearable: true })
+            .collect(),
+        (_, Some(s)) => s
+            .monitors
+            .iter()
+            .filter(|m| m.state == KumaState::Down)
+            .map(|m| DownEntry {
+                monitor: m.name.clone(),
+                message_id: message_of(&m.name),
+                since: m.since.unwrap_or(now),
+                clearable: false,
+            })
+            .collect(),
+        (_, None) => Vec::new(),
+    };
+    let down: Vec<DownEntry> = outages.iter().filter(|d| online && !monitor_muted(&d.monitor)).cloned().collect();
     let muted: Vec<MutedEntry> = if online {
         mutes
             .list(now)
@@ -74,7 +132,7 @@ pub fn tray_view_at(
                 let (name, down) = match &target {
                     MuteTarget::Monitor(name) => (
                         name.clone(),
-                        monitors.get(name).filter(|r| r.status == KumaStatus::Down).map(|r| (r.message_id, r.since)),
+                        outages.iter().find(|d| d.monitor == *name).map(|d| (d.message_id, d.since)),
                     ),
                     MuteTarget::App(id) => (app_names.get(id).cloned().unwrap_or_else(|| format!("App {id}")), None),
                 };
@@ -87,6 +145,7 @@ pub fn tray_view_at(
     // A known outage stays visible while reconnecting.
     let icon = match conn {
         _ if !down.is_empty() && online => IconKind::Down,
+        Conn::Connected if matches!(kuma, KumaView::Failing { .. }) => IconKind::Unsure,
         Conn::Connected => IconKind::Ok,
         _ => IconKind::Offline,
     };
@@ -150,6 +209,9 @@ pub enum Event {
     OutageCheck(u64),
     /// The next mute end time may have passed.
     MuteCheck(u64),
+    /// Time to ask the Uptime Kuma status page again.
+    KumaPoll(u64),
+    KumaAnswer(u64, Result<KumaSnapshot, String>),
 }
 
 /// Starts the window process or a browser.
@@ -175,6 +237,8 @@ pub struct AppDeps<B: NotifyBackend> {
     pub outage_alert_after: Duration,
     /// Shared with the D-Bus service's `Mutes`.
     pub shared_mutes: Arc<std::sync::Mutex<Mutes>>,
+    /// How often to ask the Uptime Kuma status page.
+    pub kuma_poll_every: Duration,
 }
 
 pub struct App<B: NotifyBackend> {
@@ -198,7 +262,21 @@ pub struct App<B: NotifyBackend> {
     login_expired_notified: bool,
     outage: Outage,
     mute_seq: u64,
+    kuma: Kuma,
 }
+
+/// Uptime Kuma status page polling state.
+#[derive(Default)]
+struct Kuma {
+    page: Option<StatusPage>,
+    snapshot: Option<KumaSnapshot>,
+    failures: u32,
+    seq: u64,
+    last_poll: Option<Instant>,
+}
+
+/// Failed polls in a row before the tray turns amber (one may be a blip).
+const KUMA_FAILURES_FOR_AMBER: u32 = 2;
 
 fn args_for_message(id: Option<i64>) -> Vec<String> {
     id.map_or_else(Vec::new, |id| vec!["--message".into(), id.to_string()])
@@ -229,6 +307,7 @@ impl<B: NotifyBackend> App<B> {
             login_expired_notified: false,
             outage: Outage::default(),
             mute_seq: 0,
+            kuma: Kuma::default(),
         };
         (app, tx, view_rx)
     }
@@ -258,6 +337,7 @@ impl<B: NotifyBackend> App<B> {
             &self.state.mutes,
             &self.apps,
             chrono::Utc::now(),
+            &self.kuma_view(),
         );
         self.view.send_if_modified(|old| {
             let changed = *old != view;
@@ -306,6 +386,7 @@ impl<B: NotifyBackend> App<B> {
                 None
             }
         };
+        self.restart_kuma();
         let Some(config) = self.config.clone() else {
             self.conn = Conn::NotConfigured;
             return;
@@ -456,6 +537,56 @@ impl<B: NotifyBackend> App<B> {
         self.save();
     }
 
+    fn kuma_view(&self) -> KumaView<'_> {
+        match (&self.kuma.page, &self.kuma.snapshot) {
+            (None, _) => KumaView::Off,
+            _ if self.kuma.failures >= KUMA_FAILURES_FOR_AMBER => KumaView::Failing { last: self.kuma.snapshot.as_ref() },
+            (_, Some(s)) => KumaView::Ok(s),
+            (_, None) => KumaView::Waiting,
+        }
+    }
+
+    /// (Re)reads the status page address from the config and asks right away.
+    fn restart_kuma(&mut self) {
+        let page = self.config.as_ref().and_then(|c| c.kuma_status_page.as_deref()).and_then(|u| StatusPage::parse(u).ok());
+        if page != self.kuma.page {
+            self.kuma = Kuma { page, seq: self.kuma.seq, ..Kuma::default() };
+        }
+        self.poll_kuma_now();
+    }
+
+    fn poll_kuma_now(&mut self) {
+        self.kuma.seq += 1;
+        if self.kuma.page.is_some() {
+            self.schedule(Duration::ZERO, Event::KumaPoll(self.kuma.seq));
+        }
+    }
+
+    fn on_kuma_poll(&mut self) {
+        let Some(page) = self.kuma.page.clone() else { return };
+        self.kuma.last_poll = Some(Instant::now());
+        let (tx, seq) = (self.tx.clone(), self.kuma.seq);
+        tokio::spawn(async move {
+            let _ = tx.send(Event::KumaAnswer(seq, fetch_snapshot(&page).await));
+        });
+    }
+
+    fn on_kuma_answer(&mut self, answer: Result<KumaSnapshot, String>) {
+        match answer {
+            Ok(snapshot) => {
+                self.kuma.snapshot = Some(snapshot);
+                self.kuma.failures = 0;
+            }
+            Err(e) => {
+                if self.kuma.failures == 0 {
+                    eprintln!("gotify-tray: Uptime Kuma status page: {e}");
+                }
+                self.kuma.failures += 1;
+            }
+        }
+        self.schedule(self.deps.kuma_poll_every, Event::KumaPoll(self.kuma.seq));
+    }
+
     fn set_mute(&mut self, target: MuteTarget, duration: Option<MuteFor>) {
         match duration {
             Some(d) => self.state.mutes.mute(target, d, chrono::Utc::now()),
@@ -571,6 +702,7 @@ impl<B: NotifyBackend> App<B> {
             }
             Event::Wake => {
                 self.schedule_mute_check();
+                self.poll_kuma_now();
                 // Time asleep doesn't count towards the outage alert.
                 if let Some(seq) = self.outage.restart_clock() {
                     self.schedule(self.deps.outage_alert_after, Event::OutageCheck(seq));
@@ -586,9 +718,16 @@ impl<B: NotifyBackend> App<B> {
             }
             Event::MuteCheck(seq) if seq == self.mute_seq => self.on_mute_check().await,
             Event::MuteCheck(_) => {}
+            Event::KumaPoll(seq) if seq == self.kuma.seq => self.on_kuma_poll(),
+            Event::KumaAnswer(seq, answer) if seq == self.kuma.seq => self.on_kuma_answer(answer),
+            Event::KumaPoll(_) | Event::KumaAnswer(..) => {}
             Event::WindowExited => self.resync_now(),
             Event::Tray(cmd) => match cmd {
                 TrayCommand::MenuOpened => {
+                    // Kuma caches its answer for a minute; asking more often gains nothing.
+                    if self.kuma.last_poll.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                        self.poll_kuma_now();
+                    }
                     if self.last_sync.is_none_or(|t| t.elapsed() >= MENU_RESYNC_DEBOUNCE) {
                         self.resync_now();
                     }
@@ -634,6 +773,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use gotify_core::kuma::KumaStatus;
     use gotify_core::monitors::MonitorRecord;
+    use gotify_core::kuma_status::KumaMonitor;
     use gotify_core::mutes::{MuteFor, MuteTarget, Mutes};
 
     fn monitors_with_down() -> Monitors {
@@ -662,12 +802,67 @@ mod tests {
         let now = Utc.timestamp_opt(120, 0).unwrap();
         let mut mutes = Mutes::default();
         mutes.mute(MuteTarget::Monitor("web01".into()), MuteFor::Day, now);
-        let v = tray_view_at(&Conn::Connected, Some("h"), &monitors_with_down(), 0, &mutes, &HashMap::new(), now);
+        let v = tray_view_at(&Conn::Connected, Some("h"), &monitors_with_down(), 0, &mutes, &HashMap::new(), now, &KumaView::Off);
         assert_eq!(v.icon, IconKind::Ok);
         assert!(v.down.is_empty());
         assert_eq!(v.muted.len(), 1);
         assert_eq!(v.muted[0].name, "web01");
-        assert_eq!(v.muted[0].down.map(|(id, _)| id), Some(4));
+        assert_eq!(v.muted[0].down.map(|(id, _)| id), Some(Some(4)));
+    }
+
+    fn kuma(states: &[(&str, KumaState)]) -> KumaSnapshot {
+        KumaSnapshot {
+            monitors: states
+                .iter()
+                .map(|(n, st)| KumaMonitor {
+                    name: n.to_string(),
+                    state: *st,
+                    since: Some(Utc.timestamp_opt(600, 0).unwrap()),
+                    message: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn view_with(kuma_view: KumaView, monitors: &Monitors) -> TrayView {
+        tray_view_at(&Conn::Connected, Some("h"), monitors, 0, &Mutes::default(), &HashMap::new(), Utc::now(), &kuma_view)
+    }
+
+    #[test]
+    fn kuma_decides_what_is_down() {
+        let snap = kuma(&[("web01", KumaState::Up), ("db", KumaState::Down), ("backup", KumaState::Maintenance)]);
+        // History still thinks web01 is down; Kuma says it's up.
+        let v = view_with(KumaView::Ok(&snap), &monitors_with_down());
+        assert_eq!(v.icon, IconKind::Down);
+        assert_eq!(v.down.iter().map(|d| d.monitor.as_str()).collect::<Vec<_>>(), ["db"]);
+        assert_eq!(v.down[0].message_id, None, "no Gotify message for db");
+        assert!(!v.down[0].clearable);
+        assert_eq!(v.status_line, "Connected — 1 of 3 monitors down, 1 in maintenance");
+    }
+
+    #[test]
+    fn kuma_all_up_is_green_with_count() {
+        let snap = kuma(&[("web01", KumaState::Up), ("db", KumaState::Up)]);
+        let v = view_with(KumaView::Ok(&snap), &Monitors::new());
+        assert_eq!((v.icon, v.status_line.as_str()), (IconKind::Ok, "Connected — 2 monitors up"));
+    }
+
+    #[test]
+    fn down_entry_links_to_the_gotify_message_when_there_is_one() {
+        let snap = kuma(&[("web01", KumaState::Down)]);
+        let v = view_with(KumaView::Ok(&snap), &monitors_with_down());
+        assert_eq!(v.down[0].message_id, Some(4));
+    }
+
+    #[test]
+    fn unreachable_kuma_is_amber_unless_something_is_known_down() {
+        let v = view_with(KumaView::Failing { last: None }, &Monitors::new());
+        assert_eq!((v.icon, v.status_line.as_str()), (IconKind::Unsure, "Connected — can't reach Uptime Kuma"));
+        let snap = kuma(&[("db", KumaState::Down)]);
+        let v = view_with(KumaView::Failing { last: Some(&snap) }, &Monitors::new());
+        assert_eq!(v.icon, IconKind::Down, "a known outage still shows red");
+        let v = view_with(KumaView::Waiting, &Monitors::new());
+        assert_eq!((v.icon, v.status_line.as_str()), (IconKind::Ok, "Connected — checking Uptime Kuma…"));
     }
 
     #[test]

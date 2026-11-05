@@ -10,6 +10,7 @@ use gotify_core::files::{Config, Paths, State, save_config, save_state};
 use gotify_tray::app::{App, AppDeps, Event, Launcher, ServiceCall};
 use gotify_tray::notify::{NotifyBackend, NotifyRequest, Notifier};
 use gotify_core::mutes::{MuteFor, MuteTarget};
+use gotify_tray::icon::IconKind;
 use gotify_tray::tray::{TrayCommand, TrayView};
 use tokio::sync::watch;
 
@@ -76,7 +77,7 @@ async fn setup(base: &url::Url) -> (gotify_core::model::NewClient, GotifyClient,
 }
 
 async fn start(base: &url::Url, last_notified: i64, sync_delay: Duration) -> Running {
-    start_via(base, base, last_notified, sync_delay, Duration::from_secs(300)).await
+    start_via(base, base, last_notified, sync_delay, Duration::from_secs(300), None).await
 }
 
 /// Like `start`, but the app talks to `app_url` (e.g. a proxy in front of `base`).
@@ -86,11 +87,12 @@ async fn start_via(
     last_notified: i64,
     sync_delay: Duration,
     outage_alert_after: Duration,
+    kuma_status_page: Option<String>,
 ) -> Running {
     let (new, admin, _) = setup(base).await;
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path());
-    save_config(&paths, &Config { server_url: app_url.clone(), client_id: Some(new.id), client_name: Some(new.name.clone()), user_name: "admin".into() })
+    save_config(&paths, &Config { server_url: app_url.clone(), client_id: Some(new.id), client_name: Some(new.name.clone()), user_name: "admin".into(), kuma_status_page })
         .unwrap();
     save_state(&paths, &State { last_read_id: Some(last_notified), last_notified_id: Some(last_notified), ..State::default() })
         .unwrap();
@@ -108,6 +110,7 @@ async fn start_via(
         sync_delay,
         outage_alert_after,
         shared_mutes: Default::default(),
+        kuma_poll_every: Duration::from_millis(200),
     };
     let (app, tx, view) = App::new(deps);
     tokio::spawn(app.run());
@@ -213,7 +216,7 @@ async fn outage_alert_and_all_clear() {
     let (_, _, newest) = setup(&base).await;
     let p = proxy(0).await;
     let via: url::Url = format!("http://127.0.0.1:{}/", p.port).parse().unwrap();
-    let mut r = start_via(&base, &via, newest, Duration::ZERO, Duration::from_secs(1)).await;
+    let mut r = start_via(&base, &via, newest, Duration::ZERO, Duration::from_secs(1), None).await;
     wait_for(&mut r.view, |v| v.status_line.starts_with("Connected")).await;
 
     p.task.abort(); // cut the line: open connections close, new ones are refused
@@ -248,4 +251,41 @@ async fn muted_monitor_stays_quiet() {
     assert!(v.muted.iter().any(|m| m.target == quiet && m.down.is_some()));
     r.tx.send(Event::Tray(TrayCommand::Unmute(quiet))).unwrap();
     wait_for(&mut r.view, |v| v.down.iter().any(|d| d.monitor == "quiet-mon")).await;
+}
+
+fn kuma_answers(web: i64, db: i64) -> (serde_json::Value, serde_json::Value) {
+    let page = serde_json::json!({"config": {}, "incidents": [], "maintenanceList": [], "publicGroupList": [
+        {"id": 1, "name": "Services", "monitorList": [{"id": 1, "name": "web"}, {"id": 2, "name": "db"}]}]});
+    let beat = |status| serde_json::json!([{"status": status, "time": "2026-11-05 22:00:00.000", "msg": ""}]);
+    (page, serde_json::json!({"heartbeatList": {"1": beat(web), "2": beat(db)}, "uptimeList": {}}))
+}
+
+async fn kuma_serves(kuma: &wiremock::MockServer, web: i64, db: i64) {
+    use wiremock::matchers::path;
+    use wiremock::{Mock, ResponseTemplate};
+    kuma.reset().await;
+    let (page, beats) = kuma_answers(web, db);
+    Mock::given(path("/api/status-page/s")).respond_with(ResponseTemplate::new(200).set_body_json(page)).mount(kuma).await;
+    Mock::given(path("/api/status-page/heartbeat/s")).respond_with(ResponseTemplate::new(200).set_body_json(beats)).mount(kuma).await;
+}
+
+#[tokio::test]
+async fn kuma_status_page_drives_the_tray() {
+    let Some(base) = base() else { return };
+    let _guard = SERIAL.lock().await;
+    let (_, _, newest) = setup(&base).await;
+    let kuma = wiremock::MockServer::start().await;
+    kuma_serves(&kuma, 1, 0).await;
+    let page = format!("{}/status/s", kuma.uri());
+    let mut r = start_via(&base, &base, newest, Duration::ZERO, Duration::from_secs(300), Some(page)).await;
+
+    wait_for(&mut r.view, |v| v.status_line == "Connected — 1 of 2 monitors down").await;
+    assert_eq!(r.view.borrow().icon, IconKind::Down);
+    assert_eq!(r.view.borrow().down[0].monitor, "db");
+
+    kuma_serves(&kuma, 1, 1).await;
+    wait_for(&mut r.view, |v| v.status_line == "Connected — 2 monitors up" && v.icon == IconKind::Ok).await;
+
+    kuma.reset().await; // now every request fails
+    wait_for(&mut r.view, |v| v.icon == IconKind::Unsure && v.status_line == "Connected — can't reach Uptime Kuma").await;
 }

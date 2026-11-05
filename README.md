@@ -80,8 +80,26 @@ is suspended doesn't count.
 
 - green: connected, nothing down
 - **red**: at least one Uptime Kuma monitor is down right now
+- **amber**: messages arrive, but the Uptime Kuma status page can't be reached
+  (only when a status page is set up)
 - grey: not connected, not logged in, or waiting for the keyring
 - blue dot: unread messages
+
+## Uptime Kuma status page (optional)
+
+Without it, the tray only knows what Kuma *sends* — if Kuma itself stops,
+the icon would stay green. With a status page, the tray asks Kuma directly
+every 5 minutes (and when you open the menu), so green means "every monitor
+is up" and the menu shows e.g. "Connected — 14 monitors up". The status page
+then decides what's down, and also covers monitors that don't notify Gotify.
+
+1. In Kuma: **Status Pages → New Status Page**, choose a hard-to-guess slug,
+   add all monitors, save. (Status pages need no login — keep Kuma private,
+   e.g. on Tailscale, or use an unguessable slug.)
+2. In the app: **Settings → Uptime Kuma** → paste the page's address
+   (`http://kuma:3001/status/your-slug`) → **Check and save**.
+
+If the page can't be reached twice in a row, the icon turns amber.
 
 The menu lists the monitors that are down and since when. **Clear** hides a
 monitor that will never report "Up" again (deleted or renamed in Kuma) until

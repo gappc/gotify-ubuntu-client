@@ -12,8 +12,11 @@ use crate::icon::render;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownEntry {
     pub monitor: String,
-    pub message_id: i64,
+    /// The Gotify Down message, if there is one to show.
+    pub message_id: Option<i64>,
     pub since: DateTime<Utc>,
+    /// Only outages inferred from messages can be cleared by hand.
+    pub clearable: bool,
 }
 
 /// A muted monitor or app, with its current outage (message id, since) if any.
@@ -21,7 +24,7 @@ pub struct DownEntry {
 pub struct MutedEntry {
     pub target: MuteTarget,
     pub name: String,
-    pub down: Option<(i64, DateTime<Utc>)>,
+    pub down: Option<(Option<i64>, DateTime<Utc>)>,
     /// None = until unmuted.
     pub until: Option<DateTime<Utc>>,
 }
@@ -67,15 +70,18 @@ pub fn menu_model(view: &TrayView, now: DateTime<Local>) -> Vec<MenuEntry> {
         menu.push(MenuEntry::Label("Down right now".into()));
         for d in &view.down {
             let target = MuteTarget::Monitor(d.monitor.clone());
-            let mut items = vec![
-                MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(d.message_id))),
-                MenuEntry::Separator,
-            ];
+            let mut items = Vec::new();
+            if let Some(id) = d.message_id {
+                items.push(MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(id))));
+                items.push(MenuEntry::Separator);
+            }
             items.extend(
                 MuteFor::ALL.map(|m| MenuEntry::Item(m.label().into(), TrayCommand::Mute(target.clone(), m))),
             );
-            items.push(MenuEntry::Separator);
-            items.push(MenuEntry::Item("Clear".into(), TrayCommand::ClearMonitor(d.monitor.clone())));
+            if d.clearable {
+                items.push(MenuEntry::Separator);
+                items.push(MenuEntry::Item("Clear".into(), TrayCommand::ClearMonitor(d.monitor.clone())));
+            }
             menu.push(MenuEntry::Sub(
                 format!("{} — down since {}", d.monitor, since_label(d.since.with_timezone(&Local), now)),
                 items,
@@ -91,7 +97,9 @@ pub fn menu_model(view: &TrayView, now: DateTime<Local>) -> Vec<MenuEntry> {
             label.push_str(" — ");
             if let Some((id, since)) = m.down {
                 label.push_str(&format!("down since {}, ", since_label(since.with_timezone(&Local), now)));
-                items.push(MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(id))));
+                if let Some(id) = id {
+                    items.push(MenuEntry::Item("Show message".into(), TrayCommand::ShowWindow(Some(id))));
+                }
             }
             match m.until {
                 Some(until) => label.push_str(&format!("muted until {}", until_label(until.with_timezone(&Local), now))),
@@ -202,7 +210,7 @@ mod tests {
             MutedEntry {
                 target: web(),
                 name: "web01".into(),
-                down: Some((42, Local.with_ymd_and_hms(2026, 11, 5, 14, 32, 0).unwrap().to_utc())),
+                down: Some((Some(42), Local.with_ymd_and_hms(2026, 11, 5, 14, 32, 0).unwrap().to_utc())),
                 until: Some(Local.with_ymd_and_hms(2026, 11, 6, 18, 0, 0).unwrap().to_utc()),
             },
             MutedEntry { target: MuteTarget::App(3), name: "CI".into(), down: None, until: None },
@@ -226,6 +234,16 @@ mod tests {
     }
 
     #[test]
+    fn kuma_only_outage_has_no_message_and_no_clear() {
+        let now = Local.with_ymd_and_hms(2026, 11, 5, 18, 0, 0).unwrap();
+        let since = Local.with_ymd_and_hms(2026, 11, 5, 14, 32, 0).unwrap().to_utc();
+        let menu = menu_model(&view(vec![DownEntry { monitor: "web01".into(), message_id: None, since, clearable: false }]), now);
+        let MenuEntry::Sub(_, items) = &menu[3] else { panic!("{menu:?}") };
+        assert!(!items.iter().any(|i| matches!(i, MenuEntry::Item(l, _) if l == "Show message" || l == "Clear")));
+        assert!(items.iter().any(|i| matches!(i, MenuEntry::Item(l, _) if l == "Mute for 1 day")));
+    }
+
+    #[test]
     fn menu_without_down() {
         let now = Local::now();
         let menu = menu_model(&view(vec![]), now);
@@ -240,7 +258,7 @@ mod tests {
     fn menu_with_down() {
         let now = Local.with_ymd_and_hms(2026, 11, 5, 18, 0, 0).unwrap();
         let since = Local.with_ymd_and_hms(2026, 11, 5, 14, 32, 0).unwrap().to_utc();
-        let menu = menu_model(&view(vec![DownEntry { monitor: "web01".into(), message_id: 42, since }]), now);
+        let menu = menu_model(&view(vec![DownEntry { monitor: "web01".into(), message_id: Some(42), since, clearable: true }]), now);
         let at = menu.iter().position(|e| *e == MenuEntry::Label("Down right now".into())).unwrap();
         assert_eq!(
             menu[at + 1],

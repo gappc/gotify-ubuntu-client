@@ -6,6 +6,7 @@ pub mod files;
 pub mod inbox;
 pub mod ipc;
 pub mod kuma;
+pub mod kuma_status;
 pub mod model;
 pub mod monitors;
 pub mod mutes;

@@ -5,6 +5,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gotify_core::api::{ApiError, GotifyClient, create_client, delete_client_with_password, server_info};
 use gotify_core::files::{Config, Paths, load_config, remove_config, save_config};
+use gotify_core::kuma_status::{StatusPage, fetch_snapshot};
 use gotify_core::secret::{delete_token, store_token};
 use url::Url;
 
@@ -56,6 +57,14 @@ pub fn logout_note(config: &Config, revoked: bool) -> Option<String> {
     })
 }
 
+pub fn kuma_check_text(c: &gotify_core::kuma_status::Counts) -> String {
+    match c {
+        c if c.total == 0 => "Saved — but the page lists no monitors yet.".into(),
+        c if c.down == 0 => format!("Saved — {} monitors, all up.", c.total),
+        c => format!("Saved — {} monitors, {} down.", c.total, c.down),
+    }
+}
+
 pub fn client_name(hostname: &str) -> String {
     format!("Ubuntu tray ({hostname})")
 }
@@ -86,7 +95,10 @@ fn fill(dialog: &adw::PreferencesDialog, on_changed: OnChanged, note: Option<Str
     let page = adw::PreferencesPage::new();
     let config = load_config(&Paths::from_env()).ok().flatten();
     match config {
-        Some(config) => page.add(&logged_in_group(dialog, config, on_changed)),
+        Some(config) => {
+            page.add(&logged_in_group(dialog, config.clone(), on_changed.clone()));
+            page.add(&kuma_group(config, on_changed));
+        }
         None => page.add(&logged_out_group(dialog, on_changed, note)),
     }
     dialog.add(&page);
@@ -251,8 +263,76 @@ async fn save_login(
     user_name: String,
 ) -> Result<(), String> {
     store_token(url, token).await.map_err(|e| format!("Couldn't save the token: {e}"))?;
-    let config = Config { server_url: url.clone(), client_id, client_name, user_name };
+    let config = Config { server_url: url.clone(), client_id, client_name, user_name, kuma_status_page: None };
     save_config(&Paths::from_env(), &config).map_err(|e| format!("Couldn't save the settings: {e}"))
+}
+
+/// Optional Uptime Kuma status page: lets the tray confirm all monitors are up.
+fn kuma_group(config: Config, on_changed: OnChanged) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Uptime Kuma (optional)")
+        .description("Your Kuma status page lets the tray confirm that every monitor is up, instead of relying only on the messages it receives. Use the page’s address, e.g. http://kuma:3001/status/your-slug.")
+        .build();
+    let row = adw::EntryRow::builder().title("Status page address").text(config.kuma_status_page.clone().unwrap_or_default()).build();
+    group.add(&row);
+    let save = gtk::Button::builder().label("Check and save").css_classes(["suggested-action"]).build();
+    let remove = gtk::Button::builder().label("Remove").visible(config.kuma_status_page.is_some()).build();
+    let buttons = gtk::Box::builder().spacing(12).margin_top(12).halign(gtk::Align::End).build();
+    buttons.append(&remove);
+    buttons.append(&save);
+    let status = status_label();
+    let footer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    footer.append(&buttons);
+    footer.append(&status);
+    group.add(&footer);
+
+    let store = |kuma: Option<String>| {
+        let mut c = load_config(&Paths::from_env()).ok().flatten()?;
+        c.kuma_status_page = kuma;
+        save_config(&Paths::from_env(), &c).ok()
+    };
+    {
+        let (row, status, remove, on_changed) = (row.clone(), status.clone(), remove.clone(), on_changed.clone());
+        save.connect_clicked(move |button| {
+            let page = match StatusPage::parse(&row.text()) {
+                Ok(p) => p,
+                Err(e) => return show(&status, &e, true),
+            };
+            button.set_sensitive(false);
+            show(&status, "Checking…", false);
+            let (button, status, remove, row, on_changed) =
+                (button.clone(), status.clone(), remove.clone(), row.clone(), on_changed.clone());
+            let p = page.clone();
+            spawn_ui(async move { fetch_snapshot(&p).await }, move |result| {
+                button.set_sensitive(true);
+                match result {
+                    Ok(snapshot) => {
+                        let url = page.display_url().to_string();
+                        if store(Some(url.clone())).is_none() {
+                            return show(&status, "Couldn't save the settings.", true);
+                        }
+                        row.set_text(&url);
+                        remove.set_visible(true);
+                        show(&status, &kuma_check_text(&snapshot.counts()), false);
+                        notify_daemon(DaemonCall::ReloadConfig);
+                        on_changed();
+                    }
+                    Err(e) => show(&status, &e, true),
+                }
+            });
+        });
+    }
+    remove.connect_clicked(move |button| {
+        if store(None).is_none() {
+            return show(&status, "Couldn't save the settings.", true);
+        }
+        row.set_text("");
+        button.set_visible(false);
+        show(&status, "Removed. The tray goes back to using only Gotify messages.", false);
+        notify_daemon(DaemonCall::ReloadConfig);
+        on_changed();
+    });
+    group
 }
 
 fn logged_in_group(dialog: &adw::PreferencesDialog, config: Config, on_changed: OnChanged) -> adw::PreferencesGroup {
@@ -325,6 +405,7 @@ mod tests {
             client_id: Some(3),
             client_name: Some("Ubuntu tray (laptop)".into()),
             user_name: "chris".into(),
+            kuma_status_page: None,
         };
         assert_eq!(logout_note(&c, true), None);
         assert_eq!(
@@ -337,6 +418,14 @@ mod tests {
             logout_note(&c, false).unwrap(),
             "Logged out. Delete the client you created for this app in Gotify's web UI (Clients) to revoke its token."
         );
+    }
+
+    #[test]
+    fn kuma_check_result_in_words() {
+        use gotify_core::kuma_status::Counts;
+        assert_eq!(kuma_check_text(&Counts { total: 14, up: 14, ..Counts::default() }), "Saved — 14 monitors, all up.");
+        assert_eq!(kuma_check_text(&Counts { total: 14, up: 12, down: 2, ..Counts::default() }), "Saved — 14 monitors, 2 down.");
+        assert_eq!(kuma_check_text(&Counts::default()), "Saved — but the page lists no monitors yet.");
     }
 
     #[test]

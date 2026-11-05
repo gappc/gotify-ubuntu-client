@@ -44,6 +44,7 @@ async fn run() -> zbus::Result<()> {
         sync_delay: Duration::ZERO,
         outage_alert_after: gotify_core::consts::OUTAGE_ALERT_AFTER,
         shared_mutes: shared_mutes.clone(),
+        kuma_poll_every: gotify_core::consts::KUMA_POLL_EVERY,
     };
     let (app, tx, mut view) = App::new(deps);
 

@@ -18,6 +18,9 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_name: Option<String>,
     pub user_name: String,
+    /// Optional Uptime Kuma status page, e.g. `http://kuma:3001/status/<slug>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kuma_status_page: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +151,7 @@ mod tests {
             client_id: Some(11),
             client_name: Some("Ubuntu tray (laptop)".into()),
             user_name: "chris".into(),
+            kuma_status_page: Some("http://kuma:3001/status/tray-x".into()),
         }
     }
 
@@ -180,7 +184,7 @@ mod tests {
         std::fs::create_dir_all(p.config_file.parent().unwrap()).unwrap();
         std::fs::write(&p.config_file, "server_url = \"https://g.example/\"\nuser_name = \"chris\"\n").unwrap();
         let c = load_config(&p).unwrap().unwrap();
-        assert_eq!((c.client_id, c.client_name), (None, None));
+        assert_eq!((c.client_id, c.client_name, c.kuma_status_page), (None, None, None));
     }
 
     #[test]
