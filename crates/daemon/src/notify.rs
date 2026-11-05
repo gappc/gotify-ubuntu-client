@@ -271,7 +271,7 @@ impl NotifyBackend for DbusBackend {
             Urgency::Normal => 1,
             Urgency::Critical => 2,
         };
-        let hints = HashMap::from([("urgency", Variant::from(urgency)), ("desktop-entry", Variant::from("gotify-tray"))]);
+        let hints = HashMap::from([("urgency", Variant::from(urgency)), ("desktop-entry", Variant::from(gotify_core::ipc::WINDOW_APP_ID))]);
         match self.proxy.notify("Gotify", r.replaces_id, "", &r.summary, &r.body, &actions, hints, -1).await {
             Ok(id) => id,
             Err(e) => {

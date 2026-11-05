@@ -81,6 +81,7 @@ fn main() -> gtk::glib::ExitCode {
         .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
     app.connect_startup(|app| {
+        gtk::Window::set_default_icon_name(WINDOW_APP_ID);
         app.set_accels_for_action("window.close", &["<Control>w"]);
         app.set_accels_for_action("win.search", &["<Control>f"]);
         let css = gtk::CssProvider::new();

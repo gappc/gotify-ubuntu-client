@@ -6,13 +6,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BIN_DIR="$HOME/.local/bin"
-APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+APP_ID=dev.gotifytray.GotifyTray.Window
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
+APP_DIR="$DATA_DIR/applications"
+ICON_DIR="$DATA_DIR/icons/hicolor"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
-FILES=("$BIN_DIR/gotify-tray" "$BIN_DIR/gotify-tray-window" "$APP_DIR/gotify-tray.desktop" "$AUTOSTART_DIR/gotify-tray.desktop")
+# The menu entry is named after the window's app ID so GNOME shows its icon.
+FILES=("$BIN_DIR/gotify-tray" "$BIN_DIR/gotify-tray-window" "$APP_DIR/$APP_ID.desktop"
+       "$ICON_DIR/scalable/apps/$APP_ID.svg" "$AUTOSTART_DIR/gotify-tray.desktop")
+OLD_FILES=("$APP_DIR/gotify-tray.desktop") # names used by earlier versions
 
 if [ "${1:-}" = "--uninstall" ]; then
   pkill -f "^$BIN_DIR/gotify-tray\$" 2>/dev/null || true
-  rm -f "${FILES[@]}"
+  rm -f "${FILES[@]}" "${OLD_FILES[@]}"
   echo "Removed: ${FILES[*]}"
   echo "Kept your settings (~/.config/gotify-tray), state (~/.local/state/gotify-tray) and the token in the GNOME keyring."
   echo "Log out in Settings first if you also want those gone."
@@ -22,11 +28,13 @@ fi
 cargo build --release
 install -Dm755 target/release/gotify-tray "$BIN_DIR/gotify-tray"
 install -Dm755 target/release/gotify-tray-window "$BIN_DIR/gotify-tray-window"
-for dir in "$APP_DIR" "$AUTOSTART_DIR"; do
-  mkdir -p "$dir"
-  sed "s|^Exec=.*|Exec=$BIN_DIR/gotify-tray|" data/gotify-tray.desktop > "$dir/gotify-tray.desktop"
-done
+install -Dm644 "data/icons/$APP_ID.svg" "$ICON_DIR/scalable/apps/$APP_ID.svg"
+mkdir -p "$APP_DIR" "$AUTOSTART_DIR"
+sed "s|^Exec=.*|Exec=$BIN_DIR/gotify-tray|" "data/$APP_ID.desktop" > "$APP_DIR/$APP_ID.desktop"
+sed "s|^Exec=.*|Exec=$BIN_DIR/gotify-tray|" "data/$APP_ID.desktop" > "$AUTOSTART_DIR/gotify-tray.desktop"
+rm -f "${OLD_FILES[@]}"
 command -v update-desktop-database >/dev/null && update-desktop-database "$APP_DIR" 2>/dev/null || true
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f "$ICON_DIR" 2>/dev/null || true
 RUNNING="^$BIN_DIR/gotify-tray\$"
 if pgrep -f "$RUNNING" >/dev/null; then
   # Replace the running (old) version with the new one.

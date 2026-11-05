@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="bell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#deddda"/>
+    </linearGradient>
+  </defs>
+  <!-- tile with a darker "edge" at the bottom, GNOME style -->
+  <rect x="8" y="12" width="112" height="108" rx="24" fill="#1a5fb4"/>
+  <rect x="8" y="8" width="112" height="104" rx="24" fill="url(#bg)"/>
+  <!-- bell -->
+  <path d="M64 26c-3.3 0-6 2.7-6 6v2.6C45.2 37.4 36 48.6 36 62v14l-7 9v4h70v-4l-7-9V62c0-13.4-9.2-24.6-22-27.4V32c0-3.3-2.7-6-6-6z" fill="url(#bell)"/>
+  <path d="M54 93a10 10 0 0 0 20 0z" fill="url(#bell)"/>
+  <!-- status dot -->
+  <circle cx="92" cy="34" r="14" fill="#1a5fb4"/>
+  <circle cx="92" cy="34" r="11" fill="#33d17a"/>
+</svg>
