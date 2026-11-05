@@ -7,3 +7,10 @@ license.workspace = true
 
 [dependencies]
 gotify-core.workspace = true
+gtk.workspace = true
+adw.workspace = true
+async-channel.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+zbus.workspace = true
+url.workspace = true
+chrono.workspace = true
