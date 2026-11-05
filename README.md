@@ -5,9 +5,10 @@ server, shows desktop notifications, and puts an icon in the top bar that
 turns red while an Uptime Kuma monitor is down.
 
 - **Background service** (`gotify-tray`): connection, notifications, tray
-  icon. Small and always running; it doesn't load GTK.
-- **Message window** (`gotify-tray-window`): message list and settings.
-  Starts when you open it and exits when you close it.
+  icon. Small (about 8 MB of memory) and always running; it doesn't load GTK.
+  Runs as a systemd user service.
+- **Message window** (`gotify-tray-window`): message list, search and
+  settings. Starts when you open it and exits when you close it.
 
 ## Requirements
 
@@ -16,24 +17,47 @@ turns red while an Uptime Kuma monitor is down.
 - GNOME keyring (stores the login token)
 - To build: Rust 1.99+, `libgtk-4-dev`, `libadwaita-1-dev`
 - Gotify server 3.x
+- Optional: an Uptime Kuma status page (see below)
 
 ## Install
 
 ```sh
-./install.sh              # build and install for your user
-./install.sh --uninstall  # remove it again
+./install.sh              # build, install and start (or restart) for your user
+./install.sh --uninstall  # stop and remove it again
 ```
 
-This installs both programs to `~/.local/bin`, adds "Gotify" to the app menu
-and runs the tray as a **systemd user service** (`gotify-tray.service`): it
-starts with your desktop session and is restarted automatically if it ever
-crashes. "Quit" in the tray menu stops it until your next login (or
-`systemctl --user start gotify-tray`). Running `./install.sh` again after an
-update restarts it with the new version, and closes and reopens an open message
-window so it shows the new version too.
+This installs both programs to `~/.local/bin`, adds "Gotify" (with its icon)
+to the app menu, and runs the tray as the **systemd user service**
+`gotify-tray.service`:
 
-Useful commands: `systemctl --user status gotify-tray` and
-`journalctl --user -u gotify-tray` (log).
+- it starts with your desktop session and stops when you log out,
+- it's restarted automatically about 5 seconds after a crash,
+- **Quit** in the tray menu stops it until your next login.
+
+Running `./install.sh` again after an update restarts the service with the new
+version, and closes and reopens an open message window so it shows the new
+version too. Uninstalling keeps your settings, state and the keyring token
+(log out in Settings first if you want those gone).
+
+## Running and troubleshooting
+
+| What | Command |
+|---|---|
+| Is it running, and since when? | `systemctl --user status gotify-tray` |
+| Show its log | `journalctl --user -u gotify-tray` |
+| Follow the log live | `journalctl --user -u gotify-tray -f` |
+| Log since the last boot | `journalctl --user -u gotify-tray -b` |
+| Start it again after "Quit" | `systemctl --user start gotify-tray` |
+| Restart it | `systemctl --user restart gotify-tray` |
+| Stop it | `systemctl --user stop gotify-tray` |
+| Don't start it at login | `systemctl --user disable gotify-tray` |
+| Start it at login again | `systemctl --user enable gotify-tray` |
+| Open the message window | `~/.local/bin/gotify-tray` (while it runs, a second start opens the window) |
+
+The log shows connection problems (e.g. "stream ended", "can't reach the
+server"), status page errors and keyring problems. Tip: a GNOME custom
+keyboard shortcut (Settings → Keyboard → Custom Shortcuts) running
+`~/.local/bin/gotify-tray` opens your messages with one key press.
 
 ## Log in
 
@@ -54,6 +78,47 @@ Either way the token goes into the GNOME keyring, never into a file.
 **Log out** removes the token from this computer. To revoke it fully, delete
 the client under *Clients* in Gotify's web UI (Gotify 3 doesn't let the app
 delete it without a fresh password login).
+
+## Uptime Kuma status page (optional, recommended)
+
+Without it, the tray only knows what Kuma *sends*: if Kuma itself stops, the
+icon would stay green. With a status page, the tray asks Kuma directly every
+5 minutes (and when you open the menu, at most once a minute), so green means
+"every monitor is up" and the menu shows e.g. "Connected — 14 monitors up".
+The status page then decides what's down, and also covers monitors that don't
+send notifications to Gotify.
+
+1. In Kuma: **Status Pages → New Status Page**, choose a hard-to-guess slug,
+   add all monitors, save. Status pages need no login, so keep Kuma private
+   (e.g. on Tailscale) or use an unguessable slug.
+2. In the app: **Settings → Uptime Kuma** → paste the page's address
+   (`http://kuma:3001/status/your-slug`) → **Check and save**.
+
+Each request is about 60 KB (Kuma sends the last 100 checks per monitor), so
+roughly 17 MB per day. Monitors that don't send to Gotify still turn the tray
+red, but give no pop-up; add your Gotify notification to them in Kuma
+(*Edit monitor → Notifications*) if you want pop-ups and phone alerts too.
+
+## Tray icon and menu
+
+| Icon | Meaning |
+|---|---|
+| green | connected, nothing down (confirmed by Kuma if a status page is set up) |
+| **red** | at least one monitor is down right now |
+| **amber** | messages arrive, but the Kuma status page can't be reached twice in a row |
+| grey | not connected, not logged in, or waiting for the keyring |
+| blue dot | unread messages |
+
+The menu shows the status line, the monitors that are **down right now** (and
+since when), **Muted** monitors, and *Show messages*, *Settings* and *Quit*.
+Each down monitor offers *Show message* (if Gotify has one) and the mute
+choices.
+
+Without a status page, outages are worked out from the Gotify messages, and
+each entry also has **Clear** for a monitor that will never report "Up" again
+(deleted or renamed in Kuma). Deleting a monitor's Down message also clears it.
+The app then re-checks with Gotify when the menu opens, when the message window
+closes, after deleting in the window, and every 15 minutes.
 
 ## Notifications
 
@@ -81,37 +146,6 @@ meanwhile. When the connection is back it's replaced by "Connected to Gotify
 again", followed by the usual missed-messages summary. Time while the computer
 is suspended doesn't count.
 
-## Tray icon
-
-- green: connected, nothing down
-- **red**: at least one Uptime Kuma monitor is down right now
-- **amber**: messages arrive, but the Uptime Kuma status page can't be reached
-  (only when a status page is set up)
-- grey: not connected, not logged in, or waiting for the keyring
-- blue dot: unread messages
-
-## Uptime Kuma status page (optional)
-
-Without it, the tray only knows what Kuma *sends* — if Kuma itself stops,
-the icon would stay green. With a status page, the tray asks Kuma directly
-every 5 minutes (and when you open the menu), so green means "every monitor
-is up" and the menu shows e.g. "Connected — 14 monitors up". The status page
-then decides what's down, and also covers monitors that don't notify Gotify.
-
-1. In Kuma: **Status Pages → New Status Page**, choose a hard-to-guess slug,
-   add all monitors, save. (Status pages need no login — keep Kuma private,
-   e.g. on Tailscale, or use an unguessable slug.)
-2. In the app: **Settings → Uptime Kuma** → paste the page's address
-   (`http://kuma:3001/status/your-slug`) → **Check and save**.
-
-If the page can't be reached twice in a row, the icon turns amber.
-
-The menu lists the monitors that are down and since when. **Clear** hides a
-monitor that will never report "Up" again (deleted or renamed in Kuma) until
-it sends a new message. Deleting a monitor's Down message also clears it.
-The app checks with the server when the menu opens, when the message window
-closes, and every 15 minutes.
-
 ## Mute
 
 Too noisy? Mute a monitor **for 1 day**, **for 1 week** or **until unmuted**:
@@ -121,13 +155,18 @@ their whole app). A muted monitor shows no pop-ups and doesn't turn the tray
 icon red; it's listed under **Muted** in the tray menu with its state and when
 the mute ends, and its messages stay in the window. If a mute ends while the
 monitor is still down, you get its Down notification again. Mutes are stored on
-this computer only.
+this computer only (the tray service must be running to change them).
 
-## Search
+## Message window and search
 
-In the message window press **Ctrl+F**, click the search icon, or just start
-typing. Every word must appear (upper/lower case doesn't matter) in the title,
-the text, the monitor name or the app name, e.g. `lynq prod` or `backup`.
+Shows all messages, newest first; with more than one Gotify app a sidebar
+filters by app. Delete single messages (trash button) or all of an app
+(header button); deletions happen on the server, so they disappear on your
+phone too. Links open in your browser. **Ctrl+W** closes the window.
+
+**Search:** press **Ctrl+F**, click the search icon, or just start typing.
+Every word must appear (upper/lower case doesn't matter) in the title, the
+text, the monitor name or the app name, e.g. `lynq prod` or `backup`.
 **Down only** keeps the messages shown in red: Uptime Kuma Down messages and
 other high-priority ones. Search covers the full history of the selected app;
 close the search bar (or press Esc) to see everything again.
@@ -136,9 +175,12 @@ close the search bar (or press Esc) to see everything again.
 
 | What | Where |
 |---|---|
-| Server address, client id | `~/.config/gotify-tray/config.toml` |
-| Read/notified markers, monitor states | `~/.local/state/gotify-tray/state.json` |
+| Server address, user, status page address | `~/.config/gotify-tray/config.toml` |
+| Read/notified markers, monitor states, mutes | `~/.local/state/gotify-tray/state.json` |
 | Login token | GNOME keyring (`application=gotify-tray`) |
+| Service definition | `~/.config/systemd/user/gotify-tray.service` |
+| Programs | `~/.local/bin/gotify-tray`, `~/.local/bin/gotify-tray-window` |
+| App menu entry and icon | `~/.local/share/applications/`, `~/.local/share/icons/hicolor/` |
 
 ## Known behaviour
 
@@ -155,8 +197,15 @@ tests/seed.sh send 8 "[web01] [🔴 Down] test"                  # send a Kuma-s
 tests/seed.sh down                     # stop and discard the test server
 ```
 
-Integration tests never touch a real server. To run test copies next to your own,
-set `GOTIFY_TRAY_WINDOW_APP_ID=dev.gotifytray.TestWindow` and
+Integration tests never touch a real server. To run test copies next to your
+own, set `GOTIFY_TRAY_WINDOW_APP_ID=dev.gotifytray.TestWindow` and
 `GOTIFY_TRAY_BUS_NAME=dev.gotifytray.Test` (plus separate `XDG_CONFIG_HOME` /
-`XDG_STATE_HOME`), so they never talk to your running tray. `examples/inspect.rs` does a
-read-only check against a real one (`GOTIFY_URL`, `GOTIFY_TOKEN`).
+`XDG_STATE_HOME`), so they never talk to your running tray. `install.sh`
+honours `SYSTEMCTL` (e.g. a stub) for testing the installer.
+
+Read-only checks against real servers:
+
+```sh
+GOTIFY_URL=… GOTIFY_TOKEN=… cargo run -p gotify-core --example inspect
+cargo run -p gotify-core --example kuma -- http://kuma:3001/status/your-slug
+```
