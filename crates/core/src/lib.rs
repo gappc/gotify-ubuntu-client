@@ -9,4 +9,5 @@ pub mod model;
 pub mod monitors;
 pub mod rules;
 pub mod secret;
+pub mod stream;
 pub mod text;

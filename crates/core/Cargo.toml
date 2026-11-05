@@ -14,9 +14,14 @@ toml.workspace = true
 thiserror.workspace = true
 reqwest.workspace = true
 oo7.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "net"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
+url.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-tungstenite.workspace = true
