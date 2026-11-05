@@ -198,8 +198,10 @@ close the search bar (or press Esc) to see everything again.
 
 ## Known behaviour
 
-- Whether critical notifications also show while Do Not Disturb is on
-  depends on GNOME; not yet verified on GNOME 50.
+- Kuma **Down** notifications stay on screen until dismissed (verified on
+  GNOME 50).
+- Whether they also show while Do Not Disturb is on depends on GNOME; not yet
+  verified.
 
 ## Development
 
