@@ -1,0 +1,8 @@
+{
+  "paging": {"size": 2, "since": 5, "limit": 2, "next": "/message?limit=2&since=5"},
+  "messages": [
+    {"id": 7, "appid": 3, "message": "[web01] [🔴 Down] timeout", "title": "Uptime-Kuma", "priority": 8,
+     "date": "2026-11-04T15:10:07.736095042Z", "extras": {"client::display": {"contentType": "text/plain"}}},
+    {"id": 5, "appid": 3, "message": "hello", "priority": 5, "date": "2026-11-04T14:00:00Z"}
+  ]
+}
