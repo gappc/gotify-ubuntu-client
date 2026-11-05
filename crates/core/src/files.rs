@@ -18,12 +18,35 @@ pub struct Config {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
+    /// Server these markers belong to.
+    #[serde(default)]
+    pub server: Option<String>,
     #[serde(default)]
     pub last_read_id: Option<i64>,
     #[serde(default)]
     pub last_notified_id: Option<i64>,
     #[serde(default)]
     pub monitors: Monitors,
+}
+
+impl State {
+    /// Ties the state to `server`. Logging in to a different server starts
+    /// fresh (old ids and monitors mean nothing there). Returns true if the
+    /// binding changed.
+    pub fn bind_to_server(&mut self, server: &Url) -> bool {
+        let url = server.to_string();
+        match &self.server {
+            Some(current) if *current == url => false,
+            Some(_) => {
+                *self = State { server: Some(url), ..State::default() };
+                true
+            }
+            None => {
+                self.server = Some(url);
+                true
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +153,18 @@ mod tests {
         assert_eq!(load_config(&p).unwrap(), Some(config()));
         remove_config(&p).unwrap();
         assert_eq!(load_config(&p).unwrap(), None);
+    }
+
+    #[test]
+    fn bind_to_server_resets_state_for_another_server() {
+        let a: url::Url = "https://a.example/".parse().unwrap();
+        let b: url::Url = "https://b.example/".parse().unwrap();
+        let mut s = State { last_read_id: Some(4), last_notified_id: Some(9), ..State::default() };
+        assert!(s.bind_to_server(&a)); // first binding (old state file): keep data
+        assert_eq!((s.last_read_id, s.last_notified_id), (Some(4), Some(9)));
+        assert!(!s.bind_to_server(&a));
+        assert!(s.bind_to_server(&b));
+        assert_eq!(s, State { server: Some(b.to_string()), ..State::default() });
     }
 
     #[test]

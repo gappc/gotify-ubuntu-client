@@ -32,8 +32,18 @@ pub fn endpoint(base: &Url, path: &str) -> Url {
     url
 }
 
+/// Follow redirects only within the same origin: the token travels in a
+/// custom header, which reqwest would otherwise send to any redirect target.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt.previous().first().is_some_and(|first| first.origin() == attempt.url().origin());
+        if same_origin && attempt.previous().len() < 10 { attempt.follow() } else { attempt.stop() }
+    })
+}
+
 fn http() -> reqwest::Client {
     reqwest::Client::builder()
+        .redirect(same_origin_redirects())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .user_agent(concat!("gotify-tray/", env!("CARGO_PKG_VERSION")))

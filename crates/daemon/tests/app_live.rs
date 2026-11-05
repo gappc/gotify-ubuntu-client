@@ -22,6 +22,7 @@ impl NotifyBackend for Recorder {
         sent.push(r.clone());
         sent.len() as u32
     }
+    async fn close(&mut self, _id: u32) {}
 }
 impl Recorder {
     fn summaries(&self) -> Vec<String> {

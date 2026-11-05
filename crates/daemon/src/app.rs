@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gotify_core::api::{ApiError, GotifyClient};
 use gotify_core::consts::{KEYRING_RETRY, MENU_RESYNC_DEBOUNCE, STREAM_SILENCE_TIMEOUT};
 use gotify_core::files::{Config, Paths, State, load_config, load_state, save_state};
-use gotify_core::inbox::{MissedNotice, missed_notice, unread_count};
+use gotify_core::inbox::{MissedNotice, markers_stale, missed_notice, unread_count};
 use gotify_core::model::{Application, Message};
 use gotify_core::monitors::{self, Monitors, apply_live, down_list, resync};
 use gotify_core::secret::SecretError;
@@ -222,6 +222,9 @@ impl<B: NotifyBackend> App<B> {
             self.conn = Conn::NotConfigured;
             return;
         };
+        if self.state.bind_to_server(&config.server_url) {
+            self.save();
+        }
         match (self.deps.tokens)(config.server_url.clone()).await {
             Ok(Some(token)) => {
                 self.client = Some(GotifyClient::new(config.server_url, token));
@@ -320,9 +323,19 @@ impl<B: NotifyBackend> App<B> {
         self.message_ids = result.messages.iter().map(|m| m.id).collect();
         self.state.monitors = resync(&self.state.monitors, &result.messages);
 
+        let newest = result.messages.iter().map(|m| m.id).max();
+        if markers_stale(self.state.last_notified_id, newest) {
+            eprintln!("gotify-tray: server message ids went backwards; starting fresh");
+            self.state.last_notified_id = None;
+            self.state.last_read_id = None;
+        }
         let apps = self.apps.clone();
         let (notice, last) = missed_notice(self.state.last_notified_id, &result.messages, |id| apps.get(&id).cloned());
         let first_run = self.state.last_notified_id.is_none();
+        if let Some(old) = self.state.last_notified_id {
+            let missed: Vec<Message> = result.messages.iter().filter(|m| m.id > old).cloned().collect();
+            self.deps.notifier.close_recovered(&missed).await;
+        }
         self.state.last_notified_id = last;
         if first_run && self.state.last_read_id.is_none() {
             self.state.last_read_id = last;

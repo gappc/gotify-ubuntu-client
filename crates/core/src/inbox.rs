@@ -23,6 +23,8 @@ pub fn missed_notice(
     let newest = newest_first.iter().map(|m| m.id).max();
     let new_last = match (last_notified, newest) {
         (Some(a), Some(b)) => Some(a.max(b)),
+        // First run on an empty server: start at 0 so live messages count.
+        (None, None) => Some(0),
         (a, b) => a.or(b),
     };
     let Some(last) = last_notified else { return (MissedNotice::None, new_last) };
@@ -59,6 +61,12 @@ pub fn missed_notice(
     (notice, new_last)
 }
 
+/// The server's newest id is below our markers: it was rebuilt or replaced,
+/// so the markers must start over (else new messages would be ignored).
+pub fn markers_stale(last_notified: Option<i64>, newest: Option<i64>) -> bool {
+    matches!((last_notified, newest), (Some(last), Some(newest)) if newest < last)
+}
+
 pub fn unread_count(last_read: Option<i64>, ids: impl IntoIterator<Item = i64>) -> usize {
     match last_read {
         None => 0,
@@ -83,6 +91,22 @@ mod tests {
         let (notice, last) = missed_notice(None, &[m(5, 8, "a"), m(4, 8, "b")], names);
         assert_eq!(notice, MissedNotice::None);
         assert_eq!(last, Some(5));
+    }
+
+    #[test]
+    fn first_run_with_no_messages_starts_marker() {
+        // An empty server must still start the marker, or live messages
+        // would never be notified.
+        assert_eq!(missed_notice(None, &[], names), (MissedNotice::None, Some(0)));
+    }
+
+    #[test]
+    fn markers_ahead_of_server_are_stale() {
+        // Server rebuilt or switched: its newest id is below what we saw.
+        assert!(markers_stale(Some(300), Some(12)));
+        assert!(!markers_stale(Some(12), Some(300)));
+        assert!(!markers_stale(None, Some(3)));
+        assert!(!markers_stale(Some(5), None));
     }
 
     #[test]

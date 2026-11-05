@@ -78,6 +78,7 @@ pub fn request_for_login_expired() -> NotifyRequest {
 #[allow(async_fn_in_trait)] // only used inside this crate and its tests
 pub trait NotifyBackend {
     async fn notify(&mut self, r: &NotifyRequest) -> u32;
+    async fn close(&mut self, id: u32);
 }
 
 struct Shown {
@@ -134,6 +135,18 @@ impl<B: NotifyBackend> Notifier<B> {
         }
     }
 
+    /// Closes Down banners of monitors whose recovery arrived among missed
+    /// messages (those are only summarised, so nothing would replace them).
+    pub async fn close_recovered(&mut self, missed: &[Message]) {
+        for msg in missed {
+            let Some(e) = parse_kuma(&msg.message).filter(|e| e.status == KumaStatus::Up) else { continue };
+            if let Some(id) = self.down_by_monitor.remove(&e.monitor) {
+                self.backend.close(id).await;
+                self.shown.remove(&id);
+            }
+        }
+    }
+
     pub fn on_closed(&mut self, id: u32) {
         self.shown.remove(&id);
         self.down_by_monitor.retain(|_, v| *v != id);
@@ -167,6 +180,8 @@ trait Notifications {
         hints: HashMap<&str, Variant<'_>>,
         expire_timeout: i32,
     ) -> zbus::Result<u32>;
+
+    fn close_notification(&self, id: u32) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn action_invoked(&self, id: u32, action_key: String) -> zbus::Result<()>;
@@ -213,6 +228,12 @@ impl NotifyBackend for DbusBackend {
             }
         }
     }
+
+    async fn close(&mut self, id: u32) {
+        if let Err(e) = self.proxy.close_notification(id).await {
+            eprintln!("gotify-tray: closing notification failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +250,7 @@ mod tests {
     struct Fake {
         next_id: u32,
         sent: Vec<NotifyRequest>,
+        closed: Vec<u32>,
     }
     impl NotifyBackend for Fake {
         async fn notify(&mut self, r: &NotifyRequest) -> u32 {
@@ -239,6 +261,23 @@ mod tests {
             self.next_id += 1;
             self.next_id + 6 // first id is 7
         }
+        async fn close(&mut self, id: u32) {
+            self.closed.push(id);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_in_summary_closes_down_banner() {
+        let mut n = Notifier::new(Fake::default());
+        n.show_message(&m(1, "[web01] [🔴 Down] x"), None).await;
+        n.show_message(&m(2, "[db] [🔴 Down] x"), None).await;
+        // web01 recovered while disconnected; it only shows up in a summary.
+        n.close_recovered(&[m(5, "[web01] [✅ Up] ok"), m(4, "deploy")]).await;
+        assert_eq!(n.backend().closed, [7]);
+        assert_eq!(n.on_action(7, "default"), None);
+        // db's banner is untouched and still replaceable.
+        n.show_message(&m(6, "[db] [✅ Up] ok"), None).await;
+        assert_eq!(n.backend().sent.last().unwrap().replaces_id, 8);
     }
 
     #[test]

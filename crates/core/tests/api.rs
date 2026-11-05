@@ -110,3 +110,33 @@ async fn create_client_uses_basic_auth() {
     let c = create_client(&server.uri().parse().unwrap(), "u", "p", "Ubuntu tray (host)").await.unwrap();
     assert_eq!((c.id, c.token.as_str()), (12, "CTOKEN"));
 }
+
+#[tokio::test]
+async fn token_is_not_sent_to_another_host_on_redirect() {
+    let gotify = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    Mock::given(path("/application"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", format!("{}/steal", elsewhere.uri()).as_str()))
+        .mount(&gotify)
+        .await;
+    Mock::given(path("/steal")).respond_with(ResponseTemplate::new(200).set_body_json(json!([]))).expect(0).mount(&elsewhere).await;
+    let client = GotifyClient::new(gotify.uri().parse().unwrap(), "T".into());
+    assert!(client.applications().await.is_err());
+    elsewhere.verify().await;
+}
+
+#[tokio::test]
+async fn same_host_redirect_is_followed() {
+    let server = MockServer::start().await;
+    Mock::given(path("/application"))
+        .respond_with(ResponseTemplate::new(301).insert_header("Location", format!("{}/gotify/application", server.uri()).as_str()))
+        .mount(&server)
+        .await;
+    Mock::given(path("/gotify/application"))
+        .and(header("X-Gotify-Key", "T"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+    let client = GotifyClient::new(server.uri().parse().unwrap(), "T".into());
+    assert_eq!(client.applications().await.unwrap().len(), 0);
+}

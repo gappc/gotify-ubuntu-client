@@ -55,6 +55,20 @@ struct Model {
     last_read: Option<i64>,
     unread: HashMap<i64, usize>,
     stream: Option<tokio::task::JoinHandle<()>>,
+    /// Bumped whenever the list is replaced; results of older requests are dropped.
+    view: u64,
+}
+
+impl Model {
+    fn begin_view(&mut self) -> u64 {
+        self.view += 1;
+        self.loading = false;
+        self.view
+    }
+
+    fn is_current(&self, view: u64) -> bool {
+        self.view == view
+    }
 }
 
 pub struct MessagesWindow {
@@ -230,6 +244,7 @@ fn reload(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
         task.abort();
     }
     ui.stack.set_visible_child_name("loading");
+    let view = model.borrow_mut().begin_view();
     let work = async {
         let Some(config) = load_config(&Paths::from_env()).ok().flatten() else { return Err(Problem::NotConfigured) };
         let token = match load_token(&config.server_url).await {
@@ -245,6 +260,7 @@ fn reload(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
     };
     let (ui, model) = (ui.clone(), model.clone());
     spawn_ui(work, move |result| match result {
+        _ if !model.borrow().is_current(view) => {}
         Err(problem) => show_problem(&ui, &model, problem),
         Ok(loaded) => {
             {
@@ -377,25 +393,30 @@ fn load_list(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
     };
     let Some(client) = client else { return };
     ui.stack.set_visible_child_name("loading");
+    let view = model.borrow_mut().begin_view();
     let (ui, model) = (ui.clone(), model.clone());
     spawn_ui(async move { client.messages_page(filter, None).await }, move |result| match result {
+        _ if !model.borrow().is_current(view) => {}
         Ok(page) => show_page(&ui, &model, page, true),
         Err(e) => show_problem(&ui, &model, e.into()),
     });
 }
 
 fn load_more(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
-    let (client, filter, since) = {
+    let (client, filter, since, view) = {
         let mut m = model.borrow_mut();
         if m.loading {
             return;
         }
         let (Some(client), Some(since)) = (m.client.clone(), m.next_since) else { return };
         m.loading = true;
-        (client, m.filter, since)
+        (client, m.filter, since, m.view)
     };
     let (ui, model) = (ui.clone(), model.clone());
     spawn_ui(async move { client.messages_page(filter, Some(since)).await }, move |result| {
+        if !model.borrow().is_current(view) {
+            return;
+        }
         model.borrow_mut().loading = false;
         match result {
             Ok(page) => show_page(&ui, &model, page, false),
@@ -511,6 +532,9 @@ fn mark_newest_read(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
 
 /// Live updates while the window is open; reconnects every 5 s if needed.
 fn start_stream(ui: &Rc<Ui>, model: &Rc<RefCell<Model>>) {
+    if let Some(old) = model.borrow_mut().stream.take() {
+        old.abort();
+    }
     let Some(client) = model.borrow().client.clone() else { return };
     let (tx, rx) = async_channel::unbounded::<Message>();
     let task = runtime().spawn(async move {
@@ -550,6 +574,15 @@ pub fn show_sidebar(app_count: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn results_for_an_old_view_are_dropped() {
+        let mut m = Model::default();
+        let all = m.begin_view(); // e.g. "All messages" page requested
+        let ci = m.begin_view(); // user switched to "CI" before it arrived
+        assert!(!m.is_current(all));
+        assert!(m.is_current(ci));
+    }
 
     #[test]
     fn sidebar_hidden_for_one_app() {
