@@ -652,6 +652,7 @@ dependencies = [
  "toml",
  "url",
  "wiremock",
+ "zbus 6.2.1",
 ]
 
 [[package]]
@@ -662,7 +663,9 @@ dependencies = [
  "futures-util",
  "gotify-core",
  "ksni",
+ "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
  "url",
  "zbus 6.2.1",

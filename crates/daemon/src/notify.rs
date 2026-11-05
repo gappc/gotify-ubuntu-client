@@ -12,7 +12,7 @@ use gotify_core::model::Message;
 use gotify_core::rules::{Delivery, delivery_for, display_title};
 pub use gotify_core::rules::Urgency;
 use gotify_core::text::{escape_markup, first_url};
-use zbus::zvariant::Value;
+use zbus::Variant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyRequest {
@@ -75,6 +75,7 @@ pub fn request_for_login_expired() -> NotifyRequest {
 }
 
 /// Sends one notification and returns its id (0 if sending failed).
+#[allow(async_fn_in_trait)] // only used inside this crate and its tests
 pub trait NotifyBackend {
     async fn notify(&mut self, r: &NotifyRequest) -> u32;
 }
@@ -163,7 +164,7 @@ trait Notifications {
         summary: &str,
         body: &str,
         actions: &[&str],
-        hints: HashMap<&str, Value<'_>>,
+        hints: HashMap<&str, Variant<'_>>,
         expire_timeout: i32,
     ) -> zbus::Result<u32>;
 
@@ -203,7 +204,7 @@ impl NotifyBackend for DbusBackend {
             Urgency::Normal => 1,
             Urgency::Critical => 2,
         };
-        let hints = HashMap::from([("urgency", Value::from(urgency)), ("desktop-entry", Value::from("gotify-tray"))]);
+        let hints = HashMap::from([("urgency", Variant::from(urgency)), ("desktop-entry", Variant::from("gotify-tray"))]);
         match self.proxy.notify("Gotify", r.replaces_id, "", &r.summary, &r.body, &actions, hints, -1).await {
             Ok(id) => id,
             Err(e) => {

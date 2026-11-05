@@ -4,6 +4,7 @@ pub mod api;
 pub mod consts;
 pub mod files;
 pub mod inbox;
+pub mod ipc;
 pub mod kuma;
 pub mod model;
 pub mod monitors;
