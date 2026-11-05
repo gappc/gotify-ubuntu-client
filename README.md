@@ -25,10 +25,15 @@ turns red while an Uptime Kuma monitor is down.
 ```
 
 This installs both programs to `~/.local/bin`, adds "Gotify" to the app menu
-and starts it automatically when you log in. Start it right away with
-`~/.local/bin/gotify-tray &`. Running `./install.sh` again after an update
-restarts the running copy with the new version, and closes and reopens an open
-message window so it shows the new version too.
+and runs the tray as a **systemd user service** (`gotify-tray.service`): it
+starts with your desktop session and is restarted automatically if it ever
+crashes. "Quit" in the tray menu stops it until your next login (or
+`systemctl --user start gotify-tray`). Running `./install.sh` again after an
+update restarts it with the new version, and closes and reopens an open message
+window so it shows the new version too.
+
+Useful commands: `systemctl --user status gotify-tray` and
+`journalctl --user -u gotify-tray` (log).
 
 ## Log in
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Gotify tray client
+Documentation=https://github.com/gappc/gotify-ubuntu-client
+# Started with the desktop session, stopped when you log out.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/gotify-tray
+# Restart after a crash; "Quit" in the tray menu exits cleanly and stays quit.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
