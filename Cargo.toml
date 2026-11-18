@@ -35,3 +35,7 @@ codegen-units = 1
 strip = true
 panic = "abort"
 opt-level = "s"
+
+# Keine Debug-Infos fuer Abhaengigkeiten: haelt target/debug klein
+[profile.dev.package."*"]
+debug = false
